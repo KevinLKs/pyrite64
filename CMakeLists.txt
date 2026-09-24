@@ -328,6 +328,8 @@ add_executable(pyrite64 src/main.cpp
         src/renderer/skeleton.cpp
         src/renderer/animation.h
         src/renderer/animation.cpp
+        src/utils/fileWatcher.h
+        src/utils/fileWatcher.cpp
 )
 
 # libdragon's C headers (e.g. surface_make in surface.h) use narrowing

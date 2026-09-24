@@ -102,7 +102,7 @@ namespace Editor::Actions
        delete ctx.project;
        UndoRedo::getHistory().clear();
        try {
-         ctx.project = new Project::Project(path);
+         ctx.project = new Project::Project(path, true);
          // Custom node definitions (<project>/nodes/*.js) are loaded by the Project ctor.
          if(ctx.project) {
            // The one place a project is checked for outdated files: everything past this point

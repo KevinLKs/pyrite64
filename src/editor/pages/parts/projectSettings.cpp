@@ -10,6 +10,7 @@
 #include "../../../context.h"
 #include "../../../utils/logger.h"
 #include "../../../project/romMeta.h"
+#include "../../actions.h"
 #include "misc/cpp/imgui_stdlib.h"
 #include "../../imgui/helper.h"
 #include "IconsMaterialDesignIcons.h"
@@ -231,6 +232,24 @@ bool Editor::ProjectSettings::draw()
 
   if (ImGui::CollapsingHeader("Metadata")) {
     drawMetadata();
+  }
+
+  if (ImGui::CollapsingHeader("Assets", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::TextWrapped(ICON_MDI_INFORMATION_OUTLINE
+      " New and changed files are picked up automatically. A full rescan reloads every"
+      " asset and script from disk, use it if something looks out of date.");
+
+    bool assetsDirty = ctx.project->getAssets().isDirty();
+    if(assetsDirty)ImGui::BeginDisabled();
+    if(ImGui::Button(ICON_MDI_REFRESH " Rescan All Assets")) {
+      Editor::Actions::call(Editor::Actions::Type::ASSETS_RELOAD);
+      Utils::Logger::log("Full asset rescan done");
+    }
+    if(assetsDirty) {
+      ImGui::EndDisabled();
+      ImGui::SameLine();
+      ImGui::TextColored({1.0f, 0.7f, 0.3f, 1.0f}, ICON_MDI_ALERT " Save first, a rescan discards unsaved asset changes");
+    }
   }
 
   if (ImGui::CollapsingHeader("Environment", ImGuiTreeNodeFlags_DefaultOpen)) {

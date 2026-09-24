@@ -8,15 +8,52 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
+#include <cstdint>
 
 #include "SDL3_image/SDL_image.h"
 
 extern SDL_GPUSampler *texSamplerRepeat;
 
+namespace
+{
+  // Reads width/height from a PNG's IHDR chunk (the first 24 bytes) without decoding it.
+  bool readPngSize(const std::string &path, int &w, int &h)
+  {
+    if(path.size() < 4)return false;
+    auto ext = path.substr(path.size() - 4);
+    for(auto &c : ext)c = (char)std::tolower((unsigned char)c);
+    if(ext != ".png")return false;
+
+    FILE *f = fopen(path.c_str(), "rb");
+    if(!f)return false;
+    uint8_t hdr[24]{};
+    size_t read = fread(hdr, 1, sizeof(hdr), f);
+    fclose(f);
+    if(read != sizeof(hdr))return false;
+
+    constexpr uint8_t SIG[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+    if(memcmp(hdr, SIG, 8) != 0 || memcmp(hdr + 12, "IHDR", 4) != 0)return false;
+
+    auto be32 = [](const uint8_t *p) {
+      return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | (uint32_t)p[3];
+    };
+    uint32_t pw = be32(hdr + 16);
+    uint32_t ph = be32(hdr + 20);
+    if(pw == 0 || ph == 0 || pw > 0x7FFFFFFF || ph > 0x7FFFFFFF)return false;
+    w = (int)pw;
+    h = (int)ph;
+    return true;
+  }
+}
+
 Renderer::Texture::Texture(SDL_GPUDevice* device, const std::string &imgPath, bool isMono, int rasterWidth, int rasterHeight)
   : gpuDevice(device), path(imgPath), isMono(isMono), rasterWidth(rasterWidth), rasterHeight(rasterHeight)
 {
-  // Only decode to record the size here, the pixels are read again on the first GPU use.
+  // Only the size is needed here, the pixels are read on the first GPU use.
+  // For PNGs the header has it, which avoids decoding every image when a project opens.
+  if(readPngSize(imgPath, width, height))return;
+
   auto img = decode();
   if(!img) {
     printf("Failed to load image '%s': %s\n", imgPath.c_str(), SDL_GetError());

@@ -91,7 +91,9 @@ namespace Project
     public:
       ProjectConf conf{};
 
-      Project(const std::string &p64projPath);
+      // editorMode: models load on first use and asset files are watched for changes.
+      // Leave it off for builds, which need every model loaded.
+      explicit Project(const std::string &p64projPath, bool editorMode = false);
 
       void save();
       void saveConfig();
@@ -105,4 +107,4 @@ namespace Project
       [[nodiscard]] const std::string &getConfigPath() const { return pathConfig; }
       [[nodiscard]] bool wasSavedWithNewerVersion() const { return openedFromNewerVersion; }
   };
-}
+}

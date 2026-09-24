@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <vector>
 #include <chrono>
+#include <memory>
 
 #include "../renderer/n64Mesh.h"
 #include "../renderer/object.h"
@@ -16,6 +17,8 @@
 #include "assets/model3d.h"
 #include "scene/prefab.h"
 #include "tiny3d/tools/gltf_importer/src/structs.h"
+
+namespace Utils { class FileWatcher; }
 
 namespace Project
 {
@@ -87,6 +90,8 @@ namespace Project
     std::shared_ptr<Prefab> prefab{nullptr};
     AssetConf conf{};
     Utils::CPP::Struct params{};
+    // Heavy data (currently: 3D models) is loaded on first access in the editor, see AssetManager::getEntryByUUID.
+    bool loaded{false};
 
     uint64_t getUUID() const { return conf.uuid; }
 
@@ -101,9 +106,19 @@ namespace Project
       Project *project;
       std::array<std::vector<AssetManagerEntry>, static_cast<size_t>(FileType::_SIZE)> entries{};
 
+      // Every file known under assets/ and src/user/ (key: pathKey()) with its last-write time.
+      // Only used to diff against the disk on a full sync (watcher overflow, polling fallback).
       std::unordered_map<std::string, uint64_t> watchFiles{};
       std::chrono::steady_clock::time_point watchLastCheck{};
       bool watchInitialized{false};
+      std::unique_ptr<Utils::FileWatcher> watcher{};
+
+      // Editor mode: models load on first use and the file watcher runs.
+      // Off for builds, which need every model up front and must not spawn watcher threads.
+      bool editorMode{false};
+
+      // pathKey() -> {type, index}, rebuilt together with entriesMap
+      std::unordered_map<std::string, std::pair<int, int>> pathIndex{};
 
       std::unordered_set<uint64_t> dirtyPrefabs{};
       std::unordered_set<uint64_t> dirtyAssetMeta{};
@@ -118,8 +133,16 @@ namespace Project
       std::shared_ptr<Renderer::Texture> fallbackTex{};
 
       void reloadEntry(AssetManagerEntry &entry, const std::string &path);
+      void ensureLoaded(AssetManagerEntry &entry);
       void resetDirtyTracking();
       void clearDirtyTracking(uint64_t uuid);
+      void rebuildIndex();
+      void startWatcher();
+
+      // Adds/refreshes (upserts) and removes the given files, touching nothing else.
+      bool applyChanges(const std::vector<std::string> &upserts, const std::vector<std::string> &removes);
+      // Walks all watched folders once and applies whatever differs from watchFiles.
+      bool syncWithDisk();
     public:
       std::unordered_map<uint64_t, std::pair<int, int>> entriesMap{};
       //std::unordered_map<uint64_t, int> entriesMapScript{};
@@ -127,6 +150,10 @@ namespace Project
       explicit AssetManager(Project *pr);
       ~AssetManager();
 
+      // Normalized lookup key for a file path (separators and "."/".." normalized).
+      static std::string pathKey(const std::string &path);
+
+      void setEditorMode(bool enabled) { editorMode = enabled; }
       void reload();
       void reloadAssetByUUID(uint64_t uuid);
       bool pollWatch();
@@ -157,12 +184,17 @@ namespace Project
 
       AssetManagerEntry* getByPath(const std::string &path);
 
+      // Loads the entry's heavy data (models) on first access if it was deferred.
       AssetManagerEntry* getEntryByUUID(uint64_t uuid) {
         auto it = entriesMap.find(uuid);
         if (it == entriesMap.end()) {
           return nullptr;
         }
-        return &entries[it->second.first][it->second.second];
+        auto &entry = entries[it->second.first][it->second.second];
+        if (!entry.loaded && entry.type == FileType::MODEL_3D) {
+          ensureLoaded(entry);
+        }
+        return &entry;
       }
 
       std::shared_ptr<Prefab> getPrefabByUUID(uint64_t uuid) {

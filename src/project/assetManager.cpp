@@ -21,6 +21,7 @@
 #include "../utils/meshGen.h"
 #include "../utils/string.h"
 #include "../utils/textureFormats.h"
+#include "../utils/fileWatcher.h"
 #include "tiny3d/tools/gltf_importer/src/parser.h"
 
 namespace fs = std::filesystem;
@@ -265,7 +266,8 @@ Project::AssetManager::AssetManager(Project* pr)
 }
 
 Project::AssetManager::~AssetManager() {
-
+  // stop the watcher threads before anything they report into goes away
+  watcher.reset();
 }
 
 void Project::AssetManager::resetDirtyTracking()
@@ -292,6 +294,9 @@ void Project::AssetManager::clearDirtyTracking(uint64_t uuid)
 
 void Project::AssetManager::reloadEntry(AssetManagerEntry &entry, const std::string &path)
 {
+  // set first, so a model that fails to parse is not retried on every access
+  entry.loaded = true;
+
   switch(entry.type)
   {
     case FileType::IMAGE:
@@ -365,23 +370,63 @@ void Project::AssetManager::reloadEntry(AssetManagerEntry &entry, const std::str
   }
 }
 
+void Project::AssetManager::ensureLoaded(AssetManagerEntry &entry)
+{
+  if (entry.loaded)return;
+  reloadEntry(entry, entry.path);
+}
+
+std::string Project::AssetManager::pathKey(const std::string &path)
+{
+  return fs::path{path}.lexically_normal().generic_string();
+}
+
+void Project::AssetManager::rebuildIndex()
+{
+  entriesMap.clear();
+  pathIndex.clear();
+  for (auto &typed : entries) {
+    int idx = 0;
+    for (auto &entry : typed) {
+      entriesMap[entry.getUUID()] = {(int)entry.type, idx};
+      pathIndex[pathKey(entry.path)] = {(int)entry.type, idx};
+      ++idx;
+    }
+  }
+}
+
+void Project::AssetManager::startWatcher()
+{
+  watcher.reset();
+  if (!editorMode || !Utils::FileWatcher::isSupported())return;
+
+  watcher = std::make_unique<Utils::FileWatcher>();
+  if (!watcher->start({getAssetPath(project), getCodePath(project)})) {
+    Utils::Logger::log("Asset file watcher unavailable, falling back to polling", Utils::Logger::LEVEL_WARN);
+    watcher.reset();
+  }
+}
+
 void Project::AssetManager::reload() {
   for (auto &e : entries)e.clear();
   entriesMap.clear();
+  pathIndex.clear();
   resetDirtyTracking();
   watchFiles.clear();
   watchInitialized = false;
 
-  auto assetPath = fs::path{project->getPath()} / "assets";
-  if (!fs::exists(assetPath)) {
-    fs::create_directory(assetPath);
-  }
+  auto assetPath = getAssetPath(project);
+
+  // Start watching before the scan, so nothing that changes during the scan is missed.
+  // Anything reported for files the scan already saw is simply refreshed once more.
+  startWatcher();
 
   // scan all files
   for (const auto &entry : fs::recursive_directory_iterator{assetPath}) {
     if (entry.is_regular_file()) {
       auto path = entry.path();
-      watchFiles[path.string()] = Utils::FS::getFileAge(path);
+      std::error_code ec{};
+      watchFiles[pathKey(path.string())] = entry.last_write_time(ec).time_since_epoch().count();
       AssetManagerEntry assetEntry{};
       if (!buildAssetEntry(project, path, assetEntry)) {
         continue;
@@ -410,7 +455,8 @@ void Project::AssetManager::reload() {
       auto path = entry.path();
       if (path.extension().string() != ".cpp") continue;
 
-      watchFiles[path.string()] = Utils::FS::getFileAge(path);
+      std::error_code ec{};
+      watchFiles[pathKey(path.string())] = entry.last_write_time(ec).time_since_epoch().count();
       AssetManagerEntry codeEntry{};
       if (!buildCodeEntry(project, path, codeEntry)) {
         continue;
@@ -427,218 +473,254 @@ void Project::AssetManager::reload() {
     });
   }
 
-  for (auto &typed : entries)
-  {
-    int idx = 0;
-    for (auto &entry : typed)
-    {
-      entriesMap[entry.getUUID()] = {(int)entry.type, idx};
-      ++idx;
-    }
-  }
+  rebuildIndex();
 
-  // now load models (after all textures are there now)
-  for (auto &typed : entries) {
-    for (auto &entry : typed) {
-      if (entry.type == FileType::MODEL_3D) {
-        reloadEntry(entry, entry.path);
-      }
+  // In the editor, models load on first use (getEntryByUUID), so opening a project
+  // does not parse every model in assets/. Builds still need all of them.
+  if (!editorMode) {
+    for (auto &entry : entries[(int)FileType::MODEL_3D]) {
+      reloadEntry(entry, entry.path);
     }
   }
 }
 
-bool Project::AssetManager::pollWatch()
+bool Project::AssetManager::applyChanges(const std::vector<std::string> &upserts, const std::vector<std::string> &removes)
 {
-  using Clock = std::chrono::steady_clock;
-  // Check for changes every 2 seconds
-  constexpr auto kMinInterval = std::chrono::milliseconds(2000);
+  if (upserts.empty() && removes.empty())return false;
 
-  auto now = Clock::now();
-  if (watchInitialized && (now - watchLastCheck) < kMinInterval) {
-    return false;
-  }
-  watchInitialized = true;
-  watchLastCheck = now;
+  auto codeKey = pathKey(getCodePath(project).string()) + "/";
 
-  // Snapshot current files so we can diff against watchFiles
-  std::unordered_map<std::string, uint64_t> currentFiles{};
-  std::vector<std::string> addedAssets{};
-  std::vector<std::string> modifiedAssets{};
-  std::vector<std::string> addedCode{};
-  std::vector<std::string> modifiedCode{};
-  std::vector<std::string> removedPaths{};
-
-  // Detect added/modified asset files
-  auto assetPath = fs::path{project->getPath()} / "assets";
-  if (fs::exists(assetPath)) {
-    for (const auto &entry : fs::recursive_directory_iterator{assetPath}) {
-      if (!entry.is_regular_file()) continue;
-      auto path = entry.path();
-      auto pathStr = path.string();
-      uint64_t age = Utils::FS::getFileAge(path);
-
-      currentFiles[pathStr] = age;
-      auto it = watchFiles.find(pathStr);
-      if (it == watchFiles.end()) {
-        addedAssets.push_back(pathStr);
-      } else if (it->second != age) {
-        modifiedAssets.push_back(pathStr);
-      }
-    }
-  }
-
-  // Detect added/modified script files.
-  auto codePath = getCodePath(project);
-  if (fs::exists(codePath)) {
-    for (const auto &entry : fs::recursive_directory_iterator{codePath}) {
-      if (!entry.is_regular_file()) continue;
-      auto path = entry.path();
-      if (path.extension().string() != ".cpp") continue;
-
-      auto pathStr = path.string();
-      uint64_t age = Utils::FS::getFileAge(path);
-
-      currentFiles[pathStr] = age;
-      auto it = watchFiles.find(pathStr);
-      if (it == watchFiles.end()) {
-        addedCode.push_back(pathStr);
-      } else if (it->second != age) {
-        modifiedCode.push_back(pathStr);
-      }
-    }
-  }
-
-  // Anything missing from the snapshot is treated as removed
-  for (const auto &pair : watchFiles) {
-    if (currentFiles.find(pair.first) == currentFiles.end()) {
-      removedPaths.push_back(pair.first);
-    }
-  }
-
-  // Bail out if nothing changed
-  bool changed = !addedAssets.empty() || !modifiedAssets.empty() ||
-                 !addedCode.empty() || !modifiedCode.empty() ||
-                 !removedPaths.empty();
-  if (!changed) {
-    return false;
-  }
-
-  // Track which entry lists we need to re-sort
+  // Everything that is replaced or removed is dropped in one pass per list below,
+  // instead of searching all entries once per changed file.
+  std::unordered_set<std::string> dropKeys{};
   std::unordered_set<int> touchedTypes{};
-  std::vector<std::string> modelReloadPaths{};
+  std::vector<AssetManagerEntry> newEntries{};
+  // models that were in use (loaded) and changed on disk: reload right away, as before
+  std::unordered_set<std::string> reloadModelKeys{};
 
-  // Remove an entry by absolute path across all lists
-  auto removeEntryByPath = [&](const std::string &pathStr) {
-    fs::path pathIn{pathStr};
-    for (size_t typeIdx = 0; typeIdx < entries.size(); ++typeIdx) {
+  auto markDrop = [&](const std::string &key) {
+    auto it = pathIndex.find(key);
+    if (it == pathIndex.end())return;
+    dropKeys.insert(key);
+    touchedTypes.insert(it->second.first);
+    auto &old = entries[it->second.first][it->second.second];
+    if (old.type == FileType::MODEL_3D && old.loaded) {
+      reloadModelKeys.insert(key);
+    }
+  };
+
+  for (const auto &pathStr : removes) {
+    auto key = pathKey(pathStr);
+    watchFiles.erase(key);
+    markDrop(key);
+  }
+
+  for (const auto &pathStr : upserts) {
+    fs::path path{pathStr};
+    auto key = pathKey(pathStr);
+    std::error_code ec{};
+    auto age = fs::last_write_time(path, ec);
+    watchFiles[key] = ec ? 0 : age.time_since_epoch().count();
+
+    AssetManagerEntry newEntry{};
+    bool isCode = key.starts_with(codeKey);
+    bool ok = isCode
+      ? (path.extension().string() == ".cpp" && buildCodeEntry(project, path, newEntry))
+      : buildAssetEntry(project, path, newEntry);
+
+    markDrop(key);
+    if (!ok)continue;
+
+    touchedTypes.insert((int)newEntry.type);
+    newEntries.push_back(std::move(newEntry));
+  }
+
+  if (!dropKeys.empty()) {
+    for (auto typeIdx : touchedTypes) {
       auto &typed = entries[typeIdx];
-      for (size_t i = 0; i < typed.size(); ++i) {
-        if (fs::path{typed[i].path} == pathIn) {
-          auto uuid = typed[i].getUUID();
-          clearDirtyTracking(uuid);
-          typed.erase(typed.begin() + i);
-          touchedTypes.insert(static_cast<int>(typeIdx));
-          return true;
-        }
-      }
-    }
-    return false;
-  };
-
-  for (const auto &pathStr : removedPaths) {
-    removeEntryByPath(pathStr);
-  }
-
-  // Rebuild a single asset entry and reload if needed
-  auto addOrUpdateAsset = [&](const std::string &pathStr) {
-    AssetManagerEntry newEntry{};
-    if (!buildAssetEntry(project, fs::path{pathStr}, newEntry)) {
-      return;
-    }
-
-    removeEntryByPath(pathStr);
-    entries[static_cast<int>(newEntry.type)].push_back(std::move(newEntry));
-    touchedTypes.insert(static_cast<int>(newEntry.type));
-
-    auto entry = getByPath(pathStr);
-    if (!entry) {
-      return;
-    }
-
-    if (entry->type == FileType::MODEL_3D) {
-      modelReloadPaths.push_back(pathStr);
-      return;
-    }
-
-    if (entry->type == FileType::IMAGE || entry->type == FileType::PREFAB) {
-      reloadEntry(*entry, entry->path);
-      if (entry->type == FileType::PREFAB && entry->prefab) {
-        entry->conf.uuid = entry->prefab->uuid.value;
-      }
-    }
-
-    auto uuid = entry->getUUID();
-    clearDirtyTracking(uuid);
-  };
-
-  // Rebuild a single script entry
-  auto addOrUpdateCode = [&](const std::string &pathStr) {
-    AssetManagerEntry newEntry{};
-    if (!buildCodeEntry(project, fs::path{pathStr}, newEntry)) {
-      return;
-    }
-
-    removeEntryByPath(pathStr);
-    entries[static_cast<int>(newEntry.type)].push_back(std::move(newEntry));
-    touchedTypes.insert(static_cast<int>(newEntry.type));
-  };
-
-  // Add or update all the assets and scripts that were found
-  for (const auto &pathStr : addedAssets) {
-    addOrUpdateAsset(pathStr);
-  }
-  for (const auto &pathStr : modifiedAssets) {
-    addOrUpdateAsset(pathStr);
-  }
-  for (const auto &pathStr : addedCode) {
-    addOrUpdateCode(pathStr);
-  }
-  for (const auto &pathStr : modifiedCode) {
-    addOrUpdateCode(pathStr);
-  }
-
-  // Reload models after texture updates are applied
-  for (const auto &pathStr : modelReloadPaths) {
-    auto entry = getByPath(pathStr);
-    if (entry) {
-      reloadEntry(*entry, entry->path);
+      std::erase_if(typed, [&](const AssetManagerEntry &e) {
+        if (!dropKeys.contains(pathKey(e.path)))return false;
+        clearDirtyTracking(e.getUUID());
+        return true;
+      });
     }
   }
 
-  //sort by name
-  for (size_t typeIdx = 0; typeIdx < entries.size(); ++typeIdx) {
-    if (touchedTypes.find(static_cast<int>(typeIdx)) == touchedTypes.end()) {
-      continue;
-    }
+  for (auto &e : newEntries) {
+    auto &typed = entries[(int)e.type];
+    typed.push_back(std::move(e));
+  }
+
+  for (auto typeIdx : touchedTypes) {
     auto &typed = entries[typeIdx];
     std::sort(typed.begin(), typed.end(), [](const AssetManagerEntry &a, const AssetManagerEntry &b) {
       return a.name < b.name;
     });
   }
+  rebuildIndex();
 
-  // Rebuild UUID lookup after edits
-  entriesMap.clear();
-  for (auto &typed : entries) {
-    int idx = 0;
-    for (auto &entry : typed) {
-      entriesMap[entry.getUUID()] = {(int)entry.type, idx};
-      ++idx;
+  for (const auto &pathStr : upserts) {
+    auto it = pathIndex.find(pathKey(pathStr));
+    if (it == pathIndex.end())continue;
+    auto &entry = entries[it->second.first][it->second.second];
+    if (entry.type == FileType::IMAGE || entry.type == FileType::PREFAB) {
+      reloadEntry(entry, entry.path);
+      if (entry.type == FileType::PREFAB && entry.prefab) {
+        entry.conf.uuid = entry.prefab->uuid.value;
+      }
+      clearDirtyTracking(entry.getUUID());
     }
   }
 
-  // Update watcher snapshot for next poll
-  watchFiles = std::move(currentFiles);
+  // Prefab UUIDs come from the file, so the lookup may have changed.
+  rebuildIndex();
+
+  // Reload models after texture updates are applied. Models that were never
+  // used stay unloaded (editor) and load on first access.
+  for (const auto &pathStr : upserts) {
+    auto key = pathKey(pathStr);
+    auto it = pathIndex.find(key);
+    if (it == pathIndex.end())continue;
+    auto &entry = entries[it->second.first][it->second.second];
+    if (entry.type != FileType::MODEL_3D)continue;
+
+    if (!editorMode || reloadModelKeys.contains(key)) {
+      reloadEntry(entry, entry.path);
+    }
+    if (ctx.thumbnails)ctx.thumbnails->invalidate(entry.getUUID());
+    clearDirtyTracking(entry.getUUID());
+  }
+
   return true;
+}
+
+bool Project::AssetManager::syncWithDisk()
+{
+  std::unordered_map<std::string, uint64_t> currentFiles{};
+  std::vector<std::string> upserts{};
+  std::vector<std::string> removes{};
+
+  auto scanDir = [&](const fs::path &root, bool codeOnly) {
+    std::error_code ec{};
+    if (!fs::exists(root, ec))return;
+    for (auto it = fs::recursive_directory_iterator{root, ec}; !ec && it != fs::recursive_directory_iterator{}; it.increment(ec)) {
+      if (!it->is_regular_file(ec))continue;
+      const auto &path = it->path();
+      if (codeOnly && path.extension().string() != ".cpp")continue;
+
+      // directory_entry caches the write time from the directory listing on Windows,
+      // so this does not open every file
+      std::error_code ecTime{};
+      uint64_t age = it->last_write_time(ecTime).time_since_epoch().count();
+      auto key = pathKey(path.string());
+      currentFiles[key] = age;
+
+      auto known = watchFiles.find(key);
+      if (known == watchFiles.end() || known->second != age) {
+        upserts.push_back(path.string());
+      }
+    }
+  };
+
+  scanDir(getAssetPath(project), false);
+  scanDir(getCodePath(project), true);
+
+  for (const auto &pair : watchFiles) {
+    if (!currentFiles.contains(pair.first)) {
+      removes.push_back(pair.first);
+    }
+  }
+
+  return applyChanges(upserts, removes);
+}
+
+bool Project::AssetManager::pollWatch()
+{
+  using Clock = std::chrono::steady_clock;
+
+  // No native watcher (unsupported platform or it failed to start): poll like before.
+  if (!watcher) {
+    constexpr auto kMinInterval = std::chrono::milliseconds(2000);
+    auto now = Clock::now();
+    if (watchInitialized && (now - watchLastCheck) < kMinInterval) {
+      return false;
+    }
+    watchInitialized = true;
+    watchLastCheck = now;
+    return syncWithDisk();
+  }
+
+  // Paths must be quiet for a moment, so files still being copied/written are not read half-done.
+  constexpr auto kSettleTime = std::chrono::milliseconds(300);
+  bool overflow = false;
+  auto changed = watcher->takeSettled(kSettleTime, overflow);
+
+  if (overflow) {
+    Utils::Logger::log("Too many file changes at once, rescanning assets", Utils::Logger::LEVEL_INFO);
+    return syncWithDisk();
+  }
+  if (changed.empty())return false;
+
+  auto codePath = getCodePath(project);
+  auto codeKey = pathKey(codePath.string()) + "/";
+
+  std::vector<std::string> upserts{};
+  std::vector<std::string> removes{};
+  std::unordered_set<std::string> seen{};
+
+  auto addUpsert = [&](const fs::path &path) {
+    auto key = pathKey(path.string());
+    if (key.starts_with(codeKey) && path.extension().string() != ".cpp")return;
+    if (seen.insert(key).second)upserts.push_back(path.string());
+  };
+
+  for (const auto &pathStr : changed)
+  {
+    fs::path path{pathStr};
+    auto key = pathKey(pathStr);
+    std::error_code ec{};
+    auto status = fs::status(path, ec);
+
+    if (fs::is_regular_file(status)) {
+      addUpsert(path);
+      continue;
+    }
+
+    // A file that is gone
+    if (!fs::is_directory(status) && watchFiles.contains(key)) {
+      removes.push_back(key);
+      continue;
+    }
+
+    // A directory event, or a folder that is gone. Moving a folder in or out (or deleting it
+    // to the recycle bin) only reports the folder itself, so look at what is below it.
+    // Directory listings are cheap, per-file stat calls are not, so compare against a listing.
+    std::unordered_set<std::string> onDisk{};
+    if (fs::is_directory(status)) {
+      for (auto it = fs::recursive_directory_iterator{path, ec}; !ec && it != fs::recursive_directory_iterator{}; it.increment(ec)) {
+        if (!it->is_regular_file(ec))continue;
+        auto fileKey = pathKey(it->path().string());
+        onDisk.insert(fileKey);
+
+        // only files that are new or changed, a folder event alone says nothing about the files in it
+        std::error_code ecTime{};
+        uint64_t age = it->last_write_time(ecTime).time_since_epoch().count();
+        auto known = watchFiles.find(fileKey);
+        if (known == watchFiles.end() || known->second != age) {
+          addUpsert(it->path());
+        }
+      }
+    }
+
+    auto prefix = key + "/";
+    for (const auto &known : watchFiles) {
+      if (known.first.starts_with(prefix) && !onDisk.contains(known.first)) {
+        removes.push_back(known.first);
+      }
+    }
+  }
+
+  return applyChanges(upserts, removes);
 }
 
 void Project::AssetManager::reloadAssetByUUID(uint64_t uuid) {
@@ -823,7 +905,8 @@ bool Project::AssetManager::createScript(const std::string &name, bool isGlobal,
     return false;
   }
 
-  reload();
+  // only add the new file, a full reload() would rescan (and reset) everything
+  applyChanges({filePath.string()}, {});
   return true;
 }
 
@@ -835,7 +918,7 @@ uint64_t Project::AssetManager::createNodeGraph(const std::string &name)
   if (fs::exists(filePath))return 0;
 
   Utils::FS::saveTextFile(filePath, "{\"nodes\": [], \"links\": []}");
-  reload();
+  applyChanges({filePath.string()}, {});
 
   auto entry = getByName(name + ".p64graph");
   return entry ? entry->getUUID() : 0;
@@ -843,13 +926,7 @@ uint64_t Project::AssetManager::createNodeGraph(const std::string &name)
 
 Project::AssetManagerEntry *Project::AssetManager::getByPath(const std::string &path)
 {
-  fs::path pathIn{path};
-  for (auto &typed : entries) {
-    for (auto &entry : typed) {
-      if (fs::path{entry.path} == pathIn) {
-        return &entry;
-      }
-    }
-  }
-  return nullptr;
+  auto it = pathIndex.find(pathKey(path));
+  if (it == pathIndex.end())return nullptr;
+  return &entries[it->second.first][it->second.second];
 }
