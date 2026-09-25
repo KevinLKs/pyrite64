@@ -344,6 +344,7 @@ void Project::AssetManager::reloadEntry(AssetManagerEntry &entry, const std::str
           }), .materials = {},
         };
         entry.model.autoBaseScale = baseScale;
+        entry.scaleKnown = true;
 
         for(const auto &t3dMat : entry.model.t3dm.materials) {
           auto &mat = entry.model.materials[t3dMat.first];
@@ -432,8 +433,9 @@ void Project::AssetManager::reload() {
         continue;
       }
 
+      // image previews are only needed when there is something to draw them in
       if (assetEntry.type == FileType::IMAGE) {
-        if (ctx.window) {
+        if (ctx.window && editorMode) {
           reloadEntry(assetEntry, path.string());
         }
       }
@@ -475,13 +477,26 @@ void Project::AssetManager::reload() {
 
   rebuildIndex();
 
-  // In the editor, models load on first use (getEntryByUUID), so opening a project
-  // does not parse every model in assets/. Builds still need all of them.
-  if (!editorMode) {
-    for (auto &entry : entries[(int)FileType::MODEL_3D]) {
-      reloadEntry(entry, entry.path);
-    }
+  // Models are not loaded here: getEntryByUUID() loads one on first access, and
+  // getModelScale() answers the scale without loading. Opening a project, or starting
+  // a build, therefore does not parse every model in assets/.
+}
+
+float Project::AssetManager::getModelScale(uint64_t uuid)
+{
+  auto it = entriesMap.find(uuid);
+  if (it == entriesMap.end())return 0.0f;
+  auto &entry = entries[it->second.first][it->second.second];
+  if (entry.type != FileType::MODEL_3D)return 0.0f;
+
+  // same rule as reloadEntry(), without parsing meshes/animations
+  if (!entry.loaded && !entry.scaleKnown) {
+    entry.model.autoBaseScale = entry.conf.baseScaleOverride > 0
+      ? (float)entry.conf.baseScaleOverride
+      : Build::computeAutoBaseScale(entry.path);
+    entry.scaleKnown = true;
   }
+  return entry.model.autoBaseScale;
 }
 
 bool Project::AssetManager::applyChanges(const std::vector<std::string> &upserts, const std::vector<std::string> &removes)
@@ -584,7 +599,7 @@ bool Project::AssetManager::applyChanges(const std::vector<std::string> &upserts
     auto &entry = entries[it->second.first][it->second.second];
     if (entry.type != FileType::MODEL_3D)continue;
 
-    if (!editorMode || reloadModelKeys.contains(key)) {
+    if (reloadModelKeys.contains(key)) {
       reloadEntry(entry, entry.path);
     }
     if (ctx.thumbnails)ctx.thumbnails->invalidate(entry.getUUID());

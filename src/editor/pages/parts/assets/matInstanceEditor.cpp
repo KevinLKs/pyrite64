@@ -49,7 +49,11 @@ void Editor::MatInstanceEditor::draw(
 
       slot.offset.value = glm::clamp(slot.offset.value, 0.0f, 1023.75f);
     } else if(slot.dynType.value == Project::Assets::MaterialTex::DYN_TYPE_FULL) {
-      TextureEditor::draw(matInst.texSlots[slotIdx]);
+      TextureEditor::draw(matInst.texSlots[slotIdx], modelUUID);
+      if(!ctx.project->getAssets().getEntryByUUID(slot.texUUID.value)) {
+        ImTable::add("");
+        ImGui::TextColored({1.0f, 0.4f, 0.3f, 1.0f}, "No texture set, the build will stop here");
+      }
     }
     ImGui::PopID();
 

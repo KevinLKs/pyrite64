@@ -6,6 +6,10 @@
 
 #include "../../assets/model3d.h"
 #include "../../scene/object.h"
+#include "../../scene/scene.h"
+#include "../../../build/sceneContext.h"
+#include <stdexcept>
+#include <string>
 
 nlohmann::json Project::Component::Shared::MaterialInstance::serialize() const
 {
@@ -72,6 +76,21 @@ void Project::Component::Shared::MaterialInstance::build(Utils::BinaryFile &file
   file.writeRGBA(prim.resolve(obj));
   file.writeRGBA(env.resolve(obj));
   file.writeRGBA(fresnelColor.resolve(obj));
+
+  // A "Texture" placeholder without a texture used to be written as an invalid asset index,
+  // which crashes the ROM on scene load (null sprite in Placeholder::update). Fail the build instead.
+  for(size_t i=0; i<texSlots.size(); ++i)
+  {
+    const auto &slot = texSlots[i];
+    if(!slot.set.value || slot.dynType.value != Assets::MaterialTex::DYN_TYPE_FULL)continue;
+    if(ctx.assetUUIDToIdx.contains(slot.texUUID.value))continue;
+
+    std::string error = "Material Instance slot #" + std::to_string(i) + " on object '" + obj.name + "' "
+      + (slot.texUUID.value == 0 ? "has no texture set." : "uses a texture that no longer exists.");
+    error += ctx.scene ? "\nScene: '" + ctx.scene->getName() + "'" : std::string{" (Prefab)"};
+    error += "\nPick a texture for that slot in the object's Material Instance section.";
+    throw std::runtime_error(error);
+  }
 
   for(size_t i=0; i<texSlots.size(); ++i)
   {

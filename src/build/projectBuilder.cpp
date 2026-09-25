@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <thread>
+#include <chrono>
 #include <algorithm>
 #include "../utils/fs.h"
 #include "../utils/logger.h"
@@ -52,8 +53,10 @@ void Build::SceneCtx::addAsset(const Project::AssetManagerEntry &entry)
 
   // the t3dm format stores no scale, so the runtime gets it from the asset table
   float vertexScale = 0.0f;
-  if(entry.type == AT::MODEL_3D && entry.model.autoBaseScale > 0.0f) {
-    vertexScale = 1.0f / entry.model.autoBaseScale;
+  if(entry.type == AT::MODEL_3D) {
+    // cheap lookup, the model itself only gets loaded if it has to be converted
+    float scale = project ? project->getAssets().getModelScale(entry.getUUID()) : 0.0f;
+    if(scale > 0.0f)vertexScale = 1.0f / scale;
   }
 
   assetList.push_back({entry.romPath, stringOffset, (uint32_t)entry.type, flags, vertexScale});
@@ -62,8 +65,16 @@ void Build::SceneCtx::addAsset(const Project::AssetManagerEntry &entry)
 
 bool Build::buildProject(const std::string &configPath)
 {
+  Utils::Logger::log("Build started, loading project...");
+  auto timeLoad = std::chrono::steady_clock::now();
+
   Project::Project project{configPath};
   auto path = project.getPath();
+
+  {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - timeLoad).count();
+    Utils::Logger::log("Project loaded (" + std::to_string(ms) + " ms)");
+  }
 
   // To build, all relevant project documents have to be at the current format.
   // Converting them rewrites project files, which only happens with the user's consent when the project is opened in the editor.

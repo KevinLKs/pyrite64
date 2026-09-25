@@ -92,6 +92,8 @@ namespace Project
     Utils::CPP::Struct params{};
     // Heavy data (currently: 3D models) is loaded on first access in the editor, see AssetManager::getEntryByUUID.
     bool loaded{false};
+    // model.autoBaseScale holds the real value (set by a full load or getModelScale)
+    bool scaleKnown{false};
 
     uint64_t getUUID() const { return conf.uuid; }
 
@@ -113,8 +115,9 @@ namespace Project
       bool watchInitialized{false};
       std::unique_ptr<Utils::FileWatcher> watcher{};
 
-      // Editor mode: models load on first use and the file watcher runs.
-      // Off for builds, which need every model up front and must not spawn watcher threads.
+      // Editor mode: the file watcher runs and image previews are prepared.
+      // Off for builds, which must not spawn watcher threads and do not draw anything.
+      // Models load on first use in both modes (see getEntryByUUID / getModelScale).
       bool editorMode{false};
 
       // pathKey() -> {type, index}, rebuilt together with entriesMap
@@ -154,6 +157,9 @@ namespace Project
       static std::string pathKey(const std::string &path);
 
       void setEditorMode(bool enabled) { editorMode = enabled; }
+
+      // Import scale of a model. Cheap: reads only the glTF header data, the model is not loaded.
+      float getModelScale(uint64_t uuid);
       void reload();
       void reloadAssetByUUID(uint64_t uuid);
       bool pollWatch();

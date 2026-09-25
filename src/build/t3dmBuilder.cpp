@@ -213,15 +213,30 @@ bool Build::buildT3DMAssets(Project::Project &project, SceneCtx &sceneCtx)
   auto &models = sceneCtx.project->getAssets().getTypeEntries(Project::FileType::MODEL_3D);
   auto projectPath = fs::path{project.getPath()};
 
-  for (auto &model : models)
+  size_t modelIdx = 0;
+  size_t converted = 0;
+  for (auto &listed : models)
   {
-    auto t3dmPath = projectPath / model.outPath;
+    ++modelIdx;
+    auto t3dmPath = projectPath / listed.outPath;
     auto t3dmDir = t3dmPath.parent_path();
 
-    sceneCtx.files.push_back(Utils::FS::toUnixPath(model.outPath));
+    sceneCtx.files.push_back(Utils::FS::toUnixPath(listed.outPath));
 
-    if(assetBuildNeeded(model, t3dmPath))
+    if(assetBuildNeeded(listed, t3dmPath))
     {
+      Utils::Logger::log("  Converting model " + std::to_string(modelIdx) + "/" + std::to_string(models.size())
+        + ": " + listed.name);
+
+      // Models are loaded on demand, only the ones that actually need converting are parsed.
+      auto *loaded = sceneCtx.project->getAssets().getEntryByUUID(listed.getUUID());
+      if(!loaded) {
+        Utils::Logger::log("Model asset vanished during build: " + listed.path, Utils::Logger::LEVEL_ERROR);
+        return false;
+      }
+      auto &model = *loaded;
+      ++converted;
+
       fs::create_directories(t3dmDir);
 
       T3DM::Config config{
@@ -276,5 +291,8 @@ bool Build::buildT3DMAssets(Project::Project &project, SceneCtx &sceneCtx)
       }
     }
   }
+
+  Utils::Logger::log("3D models: " + std::to_string(converted) + " converted, "
+    + std::to_string(models.size() - converted) + " up to date");
   return true;
-}
+}
