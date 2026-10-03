@@ -15,7 +15,7 @@ namespace Editor::TextureEditor
 
   /**
    * Texture field with a folder-based picker popup (thumbnails, breadcrumbs, search).
-   * Opens in startDir (project-relative, e.g. "assets/pokemon/charizard"), or "assets" if empty.
+   * Opens in startDir (project-relative, e.g. "assets/characters/hero"), or "assets" if empty.
    * Accepts image assets dragged in from the asset browser.
    * @return true if the selection changed
    */
