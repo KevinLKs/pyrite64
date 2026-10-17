@@ -107,4 +107,4 @@ namespace Project
       [[nodiscard]] const std::string &getConfigPath() const { return pathConfig; }
       [[nodiscard]] bool wasSavedWithNewerVersion() const { return openedFromNewerVersion; }
   };
-}
+}

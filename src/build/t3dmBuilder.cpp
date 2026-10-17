@@ -295,4 +295,4 @@ bool Build::buildT3DMAssets(Project::Project &project, SceneCtx &sceneCtx)
   Utils::Logger::log("3D models: " + std::to_string(converted) + " converted, "
     + std::to_string(models.size() - converted) + " up to date");
   return true;
-}
+}
