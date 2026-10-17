@@ -106,17 +106,27 @@ void Renderer::N64Mesh::draw(
     if(matEntry != ref.model->materials.end()) {
       auto mat = matEntry->second;
 
+      // Material Instance slots are numbered across the whole model in material order
+      // (MaterialInstance::validateWithModel), so start at the number of dynamic textures in the
+      // materials before this one. Starting every material at 0 made each placeholder preview slot 0's
+      // texture (e.g. Mewtwo's forehead decal, slot 1, showed his eye).
+      for(auto it = ref.model->materials.begin(); it != matEntry; ++it) {
+        if(it->second.tex0.dynType.value)++slotIdx;
+        if(it->second.tex1.dynType.value)++slotIdx;
+      }
+
       auto resolveTex = [&](Project::Assets::MaterialTex &tex, int texBinding)
       {
         if (tex.set.value) {
           if(tex.dynType.value == tex.DYN_TYPE_FULL && slotIdx < 8) {
             tex = ref.matInstance->texSlots[slotIdx];
-            ++slotIdx;
           }
           else if(tex.dynType.value == tex.DYN_TYPE_TILE && slotIdx < 8) {
             tex.offset = ref.matInstance->texSlots[slotIdx].offset;
-            ++slotIdx;
           }
+        }
+        if(tex.dynType.value)++slotIdx;
+        if (tex.set.value) {
           auto texEntry = ctx.project->getAssets().getEntryByUUID(tex.texUUID.value);
           if (texEntry && texEntry->texture) {
             part.texBindings[texBinding].texture = texEntry->texture->getGPUTex();
