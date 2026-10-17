@@ -10,9 +10,14 @@ namespace P64::Script::__UUID__
     // Types that can be set in the editor:
     // - uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t
     // - float
+    // - bool (checkbox)
+    // - color_t (color picker, default e.g. `color_t tint = {255, 0, 0, 255};`)
     // - fm_vec3_t, fm_quat_t
     // - AssetRef<sprite_t>
     // - ObjectRef
+    //
+    // For numbers you can add [[P64::Range(0, 10)]] to edit them as a slider,
+    // or [[P64::Min(0)]] / [[P64::Max(10)]] to only clamp the entered value.
     //
     // For unsigned integers (uint8_t/uint16_t/uint32_t) you can add a
     // [[P64::Bitmask("0=Fire, 1=Water, 2=Earth")]] attribute to edit them as a

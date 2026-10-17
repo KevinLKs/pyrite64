@@ -24,7 +24,8 @@ struct SDL_GPUCommandBuffer;
 struct SDL_GPUGraphicsPipeline;
 struct SDL_GPURenderPass;
 
-namespace Project { class Object; class Scene; }
+namespace Project { class Object; class Scene; struct SceneConf; }
+namespace Renderer { struct UniformN64Material; }
 
 namespace Project::Component
 {
@@ -120,12 +121,18 @@ namespace Project::Component
    */
   glm::mat4 makeModelMatrix(Object &obj, float vertexScale);
 
+  /**
+   * Sets fog (color + range of the layer)
+   */
+  void applyLayerFog(Renderer::UniformN64Material &mat, const SceneConf &conf, int layerIdx, Object &obj, bool enabled);
+
   namespace Camera
   {
     // Resolved view parameters of a camera component, used by the editor viewport to mirror it.
     struct View {
       int resX{320}; int resY{240}; float aspect{4.0f/3.0f}; float fov{65.0f};
       bool isOrtho{false}; float orthoSize{300.0f};
+      glm::vec3 worldOffset{0.0f};
     };
     View getView(Object &obj, Entry &entry);
   }

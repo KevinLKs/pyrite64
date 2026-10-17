@@ -126,21 +126,58 @@ While you can use any type you want for variables,\
 exposed ones are limited to a few known types:
 - Integers: `uint8_t`, `int8_t`, `uint16_t`, `int16_t`, `uint32_t`, `int32_t`
 - Float: `float`
+- Boolean: `bool`
+- Color: `color_t`
 - Vectors: `fm_vec3_t`, `fm_quat_t`
 - References: `AssetRef<sprite_t>`, `ObjectRef`
 
 The reference types allow you to plug in assets or objects from the editor.
 
+Booleans show up as a checkbox, colors as a color picker with alpha.\
 Vectors are edited as their individual components,\
 quaternions as their raw `x,y,z,w` values.\
-Default values can be set with a regular initializer, e.g. `fm_vec3_t dir = {0, 1, 0};`.\
+Default values can be set with a regular initializer, e.g. `fm_vec3_t dir = {0, 1, 0};`\
+or `color_t tint = {255, 128, 0, 255};` (macros like `RGBA32(...)` can't be read by the editor.)\
 A quaternion without a default value starts as the identity rotation.
+
+Keep in mind that `bool` is a single byte, so like `uint8_t` it can introduce\
+alignment gaps when followed by a larger type (see above).
 
 In the editor, you can now see the values showing up:
 
 ```{image} /_static/img/script_args.png
 :align: center
 ```
+
+### Range, Min and Max Attributes
+
+Integer and float members can be given bounds that the editor enforces.\
+`P64::Range(min, max)` turns the input into a slider between the two values:
+
+```cpp
+P64_DATA(
+  [[P64::Name("Speed"), P64::Range(0, 10)]]
+  float speed = 2.5f;
+  [[P64::Name("Lives"), P64::Range(1, 5)]]
+  uint8_t lives = 3;
+);
+```
+
+If you only want to limit a value without a slider, use `P64::Min(x)` and/or `P64::Max(x)`.\
+These keep the regular number input but clamp whatever is entered:
+
+```cpp
+P64_DATA(
+  [[P64::Name("Spawn Count"), P64::Min(1)]]
+  uint16_t spawnCount = 1;
+  [[P64::Name("Damping"), P64::Min(0), P64::Max(1)]]
+  float damping = 0.9f;
+);
+```
+
+The bounds are also applied when building the ROM, so values that ended up outside the range\
+(e.g. from a hand-edited scene or a default value) are clamped with a warning in the log.\
+Note that all attributes of a member must be in a single `[[ ... ]]` block.
 
 ### Bitmask Attribute
 

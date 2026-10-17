@@ -24,6 +24,8 @@ namespace
     if (str == "uint32_t") return Utils::DataType::u32;
     if (str == "int32_t") return Utils::DataType::s32;
     if (str == "float") return Utils::DataType::f32;
+    if (str == "bool") return Utils::DataType::BOOL;
+    if (str == "color_t") return Utils::DataType::COLOR;
     if (str == "char") return Utils::DataType::string;
     if (str == "fm_vec3_t") return Utils::DataType::VEC3;
     if (str == "fm_quat_t") return Utils::DataType::QUAT;
@@ -37,6 +39,7 @@ namespace
     switch(type) {
       case Utils::DataType::u8:
       case Utils::DataType::s8:
+      case Utils::DataType::BOOL:
         return 1;
       case Utils::DataType::u16:
       case Utils::DataType::s16:
@@ -48,6 +51,7 @@ namespace
       case Utils::DataType::u32:
       case Utils::DataType::s32:
       case Utils::DataType::f32:
+      case Utils::DataType::COLOR:
       case Utils::DataType::ASSET_SPRITE:
       case Utils::DataType::OBJECT_REF:
       case Utils::DataType::PREFAB:
@@ -78,6 +82,21 @@ namespace
     return result;
   }
 
+  // If 'i' sits on the opening quote of a string or char literal, advances it past the
+  // closing quote (honoring backslash escapes) and returns true. Used by the parenthesis
+  // scanners so brackets inside literals (e.g. P64::Name("foo(((")) don't affect nesting.
+  bool skipLiteral(const std::string& text, size_t& i) {
+    char quote = text[i];
+    if (quote != '"' && quote != '\'') return false;
+    ++i;
+    while (i < text.size() && text[i] != quote) {
+      if (text[i] == '\\') ++i;
+      ++i;
+    }
+    if (i < text.size()) ++i; // closing quote
+    return true;
+  }
+
   std::unordered_map<std::string, std::string> parseAttributes(const std::string& attrText) {
     std::unordered_map<std::string, std::string> result;
     std::string text = trim(attrText);
@@ -97,6 +116,7 @@ namespace
         int depth = 1;
         size_t valStart = i;
         while (i < text.size() && depth > 0) {
+          if (skipLiteral(text, i)) continue;
           if (text[i] == '(') depth++;
           else if (text[i] == ')') depth--;
           ++i;
@@ -121,20 +141,26 @@ Utils::CPP::Struct Utils::CPP::parseDataStruct(const std::string &sourceCode, co
   auto code = std::regex_replace(sourceCode, std::regex(R"(//[^\n]*)"), "");
   code = std::regex_replace(code, std::regex(R"(/\*[\s\S]*?\*/)"), "");
 
-  std::vector<Struct> structs{};
-
-  // match all structs to get the body of it
-  std::regex structRegex(R"(P64_DATA\(([\s\S]*?)\);)");
-
-  std::smatch structMatch;
-  auto structBegin = code.cbegin();
-
-  while (std::regex_search(structBegin, code.cend(), structMatch, structRegex))
+  // Locate the P64_DATA(...) body by matching parentheses, so defaults that
+  // contain calls or macros (e.g. "color_t c = RGBA32(...)") don't end it early.
+  auto bodyStart = code.find("P64_DATA(");
+  if (bodyStart != std::string::npos)
   {
-    Struct s{.name = "Data"};
-    if (s.name != structName)continue;
+    bodyStart += std::string_view{"P64_DATA("}.size();
+    size_t bodyEnd = bodyStart;
+    int depth = 1;
+    while (bodyEnd < code.size() && depth > 0) {
+      if (skipLiteral(code, bodyEnd)) continue;
+      if (code[bodyEnd] == '(') ++depth;
+      else if (code[bodyEnd] == ')') --depth;
+      ++bodyEnd;
+    }
+    if (depth != 0) return {};
 
-    std::string body = structMatch[1];
+    Struct s{.name = "Data"};
+    if (s.name != structName) return {};
+
+    std::string body = code.substr(bodyStart, bodyEnd - 1 - bodyStart);
 
     // Regex for attributes + field lines
     std::regex fieldRegex(
@@ -160,6 +186,53 @@ Utils::CPP::Struct Utils::CPP::parseDataStruct(const std::string &sourceCode, co
         if (bitmaskAttr != field.attr.end()) {
           field.bitmask = parseBitmask(bitmaskAttr->second);
         }
+      }
+
+      // Pre-parse numeric bounds: Range(min, max) gives a slider, Min(x)/Max(x) only clamp.
+      if (field.isNumeric()) {
+        auto rangeAttr = field.attr.find("P64::Range");
+        if (rangeAttr != field.attr.end()) {
+          auto values = Utils::parseFloatList(rangeAttr->second);
+          if (values.size() >= 2 && values[0] <= values[1]) {
+            field.min = values[0];
+            field.max = values[1];
+            field.slider = true;
+          } else {
+            Logger::log("Invalid P64::Range on field '" + field.name + "', expected (min, max)", Logger::LEVEL_WARN);
+          }
+        }
+        auto minAttr = field.attr.find("P64::Min");
+        if (minAttr != field.attr.end()) {
+          auto values = Utils::parseFloatList(minAttr->second);
+          if (!values.empty()) field.min = values[0];
+        }
+        auto maxAttr = field.attr.find("P64::Max");
+        if (maxAttr != field.attr.end()) {
+          auto values = Utils::parseFloatList(maxAttr->second);
+          if (!values.empty()) field.max = values[0];
+        }
+        if (field.min && field.max && *field.min > *field.max) {
+          Logger::log("Field '" + field.name + "' has min > max, ignoring bounds", Logger::LEVEL_WARN);
+          field.min.reset();
+          field.max.reset();
+          field.slider = false;
+        }
+      }
+
+      // Normalize bool defaults ("true"/"1"/empty) into "0"/"1".
+      if (field.type == DataType::BOOL) {
+        auto def = trim(field.defaultValue);
+        field.defaultValue = (def == "true" || def == "1") ? "1" : "0";
+      }
+
+      // Normalize color defaults (e.g. "{255, 0, 0, 255}" or empty) into "r,g,b,a".
+      // Macros like RGBA32(...) can't be evaluated here and fall back to opaque white.
+      if (field.type == DataType::COLOR) {
+        auto def = trim(field.defaultValue);
+        auto values = (def.empty() || def[0] != '{') ? std::vector<float>{} : Utils::parseFloatList(def);
+        values.resize(4, 255.0f);
+        for (auto &v : values) v = std::clamp(v, 0.0f, 255.0f);
+        field.defaultValue = Utils::floatListToString(values.data(), values.size());
       }
 
       // Normalize vector defaults (e.g. "{{1, 2, 3}}" or empty) into the "x,y,z" form stored by the editor.
@@ -189,9 +262,7 @@ Utils::CPP::Struct Utils::CPP::parseDataStruct(const std::string &sourceCode, co
       fieldBegin = fieldMatch.suffix().first;
     }
 
-    //structs.push_back(std::move(s));
     return s;
-    // structBegin = structMatch.suffix().first;
   }
 
   return {};

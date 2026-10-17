@@ -89,6 +89,10 @@ void Utils::Toolchain::scan()
       printf("tiny3d out of date, missing 't3d_state_set_lighting_mode' in t3d.h\n");
       state.upToDateLibs = false;
     }
+    if(!t3dHeader.contains("#define T3D_LIB_VER_MAJOR 1")) {
+      printf("tiny3d out of date, missing '#define T3D_LIB_VER_MAJOR 1' in t3d.h\n");
+      state.upToDateLibs = false;
+    }
   }
 }
 

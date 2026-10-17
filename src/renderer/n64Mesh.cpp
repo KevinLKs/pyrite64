@@ -21,7 +21,7 @@ namespace
   constinit glm::vec4 lastEnv{};
 }
 
-void Renderer::N64Mesh::fromT3DM(const Project::Assets::Model3D &model3d, Project::AssetManager &assetManager)
+void Renderer::N64Mesh::fromT3DM(const Project::Assets::Model3D &model3d, Project::AssetManager &assetManager, bool includeNoMaterial)
 {
   loaded = false;
   mesh.vertices.clear();
@@ -30,11 +30,12 @@ void Renderer::N64Mesh::fromT3DM(const Project::Assets::Model3D &model3d, Projec
 
   auto &t3dmData = model3d.t3dm;
   mesh.vertexScale = model3d.autoBaseScale > 0.0f ? 1.0f / model3d.autoBaseScale : 1.0f;
-  parts.resize(t3dmData.models.size());
+  auto &models = includeNoMaterial ? t3dmData.modelsNoMat : t3dmData.models;
+  parts.resize(models.size());
   auto part = parts.begin();
 
   uint16_t idx = 0;
-  for (auto &model : t3dmData.models)
+  for (auto &model : models)
   {
     part->indicesOffset = mesh.indices.size();
     part->indicesCount = model.triangles.size() * 3;
@@ -90,7 +91,9 @@ void Renderer::N64Mesh::draw(
 ) {
   if (!scene)return;
 
-  uint32_t flagsGlobal = uniforms.mat.flags & LIGHT_MODE_ADD;
+  uint32_t flagsGlobal = uniforms.mat.flags & (LIGHT_MODE_ADD | FOG_TO_ALPHA | FOG_BLEND);
+  glm::vec4 fogColor = uniforms.mat.fogColor;
+  glm::vec2 fogRange = uniforms.mat.fogRange;
 
   int boundPipeline = -1;
 
@@ -100,6 +103,7 @@ void Renderer::N64Mesh::draw(
 
     bool depthRead = ref.layerDepthRead;
     bool depthWrite = ref.layerDepthWrite;
+    uint32_t flags = flagsGlobal;
 
     uint32_t slotIdx = 0;
     auto matEntry = ref.model->materials.find(part.materialName);
@@ -139,6 +143,11 @@ void Renderer::N64Mesh::draw(
         resolveTex(mat.tex0, 0);
         resolveTex(mat.tex1, 1);
         N64Material::convert(part, mat);
+      }
+
+      if(mat.fogSet.value && (flags & FOG_TO_ALPHA)) {
+        flags &= ~FOG_BLEND;
+        if(mat.fog.value != 0)flags |= FOG_BLEND;
       }
 
       if(mat.zmodeSet.value) {
@@ -182,7 +191,9 @@ void Renderer::N64Mesh::draw(
     uniforms.mat.colPrim = lastPrim;
     uniforms.mat.colEnv = lastEnv;
     uniforms.mat.blender.x = blender;
-    uniforms.mat.flags |= flagsGlobal;
+    uniforms.mat.flags |= flags;
+    uniforms.mat.fogColor = fogColor;
+    uniforms.mat.fogRange = fogRange;
 
     // @TODO: move out
 

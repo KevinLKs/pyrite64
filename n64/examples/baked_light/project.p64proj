@@ -34,7 +34,7 @@
       }
     ]
   },
-  "name": "baked_light",
+  "name": "Baked Light",
   "pathEmu": "ares",
   "pathN64Inst": "",
   "romHeader": {
@@ -51,7 +51,7 @@
     "saveType": 0
   },
   "romName": "baked_light",
-  "sceneIdLastOpened": 1,
+  "sceneIdLastOpened": 2,
   "sceneIdOnBoot": 1,
   "sceneIdOnReset": 1,
   "visLayer0": "Default",

@@ -4,6 +4,8 @@ Breaking Changes by version they were introduced in.
 
 ## v0.9.0
 
+Also checkout the tiny3d breaking changes: <https://github.com/HailToDodongo/tiny3d/blob/main/breakingChanges.md#precision-fix-2026-09-28-e14ff480e6ab15b723373754d1edd95af22cc9f5>
+
 Every length in the editor and engine is now in meters.
 
 Before, scenes stored positions and sizes in "visual units", and a per-scene

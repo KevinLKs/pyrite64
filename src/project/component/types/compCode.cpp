@@ -13,6 +13,9 @@
 #include "../../../utils/proc.h"
 #include "../../../utils/string.h"
 
+#include <algorithm>
+#include "glm/gtc/type_ptr.hpp"
+
 namespace Project::Component::Code
 {
   struct Data
@@ -107,6 +110,28 @@ namespace Project::Component::Code
         uint64_t uuid = Utils::parseU64(val);
         ctx.fileObj.write<uint32_t>(ctx.assetUUIDToIdx[uuid]);
       } else {
+        // Enforce Range/Min/Max at build time too, so hand-edited scenes or
+        // defaults that fall outside the bounds can't mess up the ROM.
+        if (field.isNumeric() && (field.min || field.max)) {
+          try {
+            double v = std::stod(val);
+            double clamped = v;
+            if (field.min) clamped = std::max(clamped, static_cast<double>(*field.min));
+            if (field.max) clamped = std::min(clamped, static_cast<double>(*field.max));
+            if (clamped != v) {
+              float clampedF = static_cast<float>(clamped);
+              std::string clampedStr = field.type == Utils::DataType::f32
+                ? Utils::floatListToString(&clampedF, 1)
+                : std::to_string(static_cast<int64_t>(clamped));
+              Utils::Logger::log(
+                script->getName() + ": '" + field.name + "' value " + val + " is out of range, clamped to " + clampedStr,
+                Utils::Logger::LEVEL_WARN
+              );
+              val = clampedStr;
+            }
+          } catch (...) {} // invalid text is reported by writeAs below
+        }
+
         try
         {
           ctx.fileObj.writeAs(val, field.type);
@@ -183,7 +208,7 @@ namespace Project::Component::Code
             // Lock toggle button
             if (isInstanceMode)
             {
-              if (ImGui::IconToggle(isOverridden, ICON_MDI_LOCK_OPEN, ICON_MDI_LOCK, ImVec2{16,16})) {
+              if (ImGui::IconToggle(isOverridden, ICON_MDI_LOCK_OPEN, ICON_MDI_LOCK, ImVec2{20_px, 20_px})) {
                 if (isOverridden) {
                   obj.addPropOverride(prop);
                 } else {
@@ -246,6 +271,65 @@ namespace Project::Component::Code
                 return true;
               }
               return false;
+            }, nullptr);
+          } else if(field.type == Utils::DataType::BOOL) {
+            ImTable::addObjProp<std::string>(name, prop, [&](std::string *val) -> bool {
+              bool checked = (*val == "1" || *val == "true");
+              if (ImGui::Checkbox("##", &checked)) {
+                *val = checked ? "1" : "0";
+                return true;
+              }
+              return false;
+            }, nullptr);
+          } else if(field.type == Utils::DataType::COLOR) {
+            ImTable::addObjProp<std::string>(name, prop, [&](std::string *val) -> bool {
+              auto values = Utils::parseFloatList(*val);
+              values.resize(4, 255.0f);
+              glm::vec4 col{values[0], values[1], values[2], values[3]};
+              col /= 255.0f;
+              if (ImGui::ColorEdit4("##", glm::value_ptr(col),
+                ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaPreviewHalf | ImGuiColorEditFlags_AlphaBar
+              )) {
+                col = glm::round(glm::clamp(col, 0.0f, 1.0f) * 255.0f);
+                *val = Utils::floatListToString(glm::value_ptr(col), 4);
+                return true;
+              }
+              return false;
+            }, nullptr);
+          } else if(field.isNumeric() && field.bitmask.empty() && (field.min || field.max)) {
+            // Bounded number: Range(min,max) shows a slider, Min/Max clamp the input field.
+            ImTable::addObjProp<std::string>(name, prop, [&](std::string *val) -> bool {
+              const bool isFloat = field.type == Utils::DataType::f32;
+              bool changed = false;
+              if (isFloat) {
+                float v = 0.0f;
+                try { v = std::stof(*val); } catch (...) {}
+                if (field.slider) {
+                  changed = ImGui::SliderFloat("##", &v, *field.min, *field.max, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+                } else {
+                  changed = ImGui::InputFloat("##", &v);
+                }
+                if (changed) {
+                  if (field.min) v = std::max(v, *field.min);
+                  if (field.max) v = std::min(v, *field.max);
+                  *val = Utils::floatListToString(&v, 1);
+                }
+              } else {
+                int64_t v = 0;
+                try { v = std::stoll(*val); } catch (...) {}
+                if (field.slider) {
+                  int64_t lo = static_cast<int64_t>(*field.min), hi = static_cast<int64_t>(*field.max);
+                  changed = ImGui::SliderScalar("##", ImGuiDataType_S64, &v, &lo, &hi, nullptr, ImGuiSliderFlags_AlwaysClamp);
+                } else {
+                  changed = ImGui::InputScalar("##", ImGuiDataType_S64, &v);
+                }
+                if (changed) {
+                  if (field.min) v = std::max(v, static_cast<int64_t>(*field.min));
+                  if (field.max) v = std::min(v, static_cast<int64_t>(*field.max));
+                  *val = std::to_string(v);
+                }
+              }
+              return changed;
             }, nullptr);
           } else if(!field.bitmask.empty()) {
             ImTable::addObjProp<std::string>(name, prop, [&](std::string *val) -> bool {

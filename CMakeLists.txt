@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(pyrite64 VERSION 0.9.0)
+project(pyrite64 VERSION 0.10.0)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -199,6 +199,7 @@ add_executable(pyrite64 src/main.cpp
         src/build/projectBuilder.cpp
         src/build/romMetaBuilder.h
         src/build/romMetaBuilder.cpp
+        src/build/vscodeProject.cpp
         src/utils/fs.h
         src/utils/string.h
         src/utils/proc.h

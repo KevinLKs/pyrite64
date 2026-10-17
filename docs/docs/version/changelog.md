@@ -2,23 +2,36 @@
 
 ## v0.9.0
 
-### Meters everywhere
+### Materials & Rendering
+* Material setting for t3d Z-offset (decal alternative) by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/305
+* Add Visibility Layers to define what cameras render by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/312
+* Added "Surface" component by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/311
+* Allow Cameras to target offscreen surfaces by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/313
 
-* The editor, scene files and engine now use meters for every length. By @Byterset in https://github.com/HailToDodongo/pyrite64/pull/315
-* Positions, component sizes and distances are no longer in "visual units", and the
-  `Visual Units Per Meter` scene setting became **Render Scale** under *Advanced*, affecting
-  render precision only.
-* 3D models render at the size they were modeled at. The **Base-Scale** import setting was
-  replaced by an automatic vertex precision computed from the model bounds, with an optional
-  manual override in the asset inspector.
-* Scenes and prefabs are versioned and get converted automatically. Opening an older project asks
-  before rewriting anything, attempting to build one that was not updated fails with an error.
+### Features & Engine changes
+* [FIX] Camera Component now responds to object enable/disable state correctly by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/308
+* Use Meters for Objects and components, decouple rendering scale + auto model import scaling by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/315
 
-```{admonition} This version introduced breaking changes!
-:class: warning
+### Physics System
+* Small physics memory optimizations by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/307
+* chg: Optimizations in collision detection by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/324
+* chg: Build time Mesh Collider BVHs by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/325
 
-Checkout [Breaking Changes](./breakingChanges) for more information.
-```
+### Editor
+* Add search filter to scene graph by @LlanerasJ in https://github.com/HailToDodongo/pyrite64/pull/280
+* Asset browser improvements by @MoisesMlg in https://github.com/HailToDodongo/pyrite64/pull/296
+* Allow to disable components by @MoisesMlg in https://github.com/HailToDodongo/pyrite64/pull/294
+* feat: Allow to drag-drop a 3D model into the scene by @MoisesMlg in https://github.com/HailToDodongo/pyrite64/pull/310
+* chg: trigger rebuilds on header changes if needed by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/314
+* Scene graph tree multi selection / dragging by @MoisesMlg in https://github.com/HailToDodongo/pyrite64/pull/316
+* Fix: handle collider shape changes properly & expose sensible collider api by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/322
+* Improve Editor-performance with huge amounts of image assets by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/326
+* Preview Constraints in Editor (e.g. billboards, skyboxes) by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/327
+
+### Docs & Build
+* docs: Add info about SDL dependencies to build docs by @thekovic in https://github.com/HailToDodongo/pyrite64/pull/319
+
+**Full Changelog**: https://github.com/HailToDodongo/pyrite64/compare/v0.8.0...v0.9.0
 
 ## v0.8.0
 
