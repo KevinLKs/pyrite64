@@ -59,6 +59,16 @@ namespace P64::Comp
         return &anims[idx];
       }
 
+      // Poke64 fork (2026-10-21): read-only access for effects that follow a joint
+      // (Stadium creature flames, src/user/StadiumFlames.cpp).
+      T3DSkeleton* getSkeleton() {
+        return skelMain.bones ? &skelMain : nullptr;
+      }
+
+      float getVertexScale() const {
+        return vertexScale;
+      }
+
     static uint32_t getAllocSize([[maybe_unused]] uint16_t* initData);
 
     static void initDelete([[maybe_unused]] Object& obj, AnimModel* data, void* initData);

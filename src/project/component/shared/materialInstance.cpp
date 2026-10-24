@@ -8,6 +8,7 @@
 #include "../../scene/object.h"
 #include "../../scene/scene.h"
 #include "../../../build/sceneContext.h"
+#include <array>
 #include <stdexcept>
 #include <string>
 
@@ -110,32 +111,40 @@ void Project::Component::Shared::MaterialInstance::build(Utils::BinaryFile &file
 
 void Project::Component::Shared::MaterialInstance::validateWithModel(const Assets::Model3D &model)
 {
-  uint32_t slotIdx = 0;
+  // Fork change (2026-10-18): the runtime material reads the instance slot named by its own
+  // dynPlaceholder index (tile.phIndex), so each instance slot is placed at that index instead of
+  // being counted in unordered_map iteration order (which could swap e.g. eye and mouth slots).
+  // An out-of-range or already used index falls back to the next free slot.
+  std::array<bool, 8> used{};
+  auto handleTex = [&](const Assets::MaterialTex &t, int tileIdx)
+  {
+    if(!t.dynType.value)return;
+    int idx = t.dynPlaceholder.value;
+    if(idx < 0 || idx >= (int)texSlots.size() || used[idx]) {
+      idx = -1;
+      for(int i=0; i<(int)texSlots.size(); ++i) {
+        if(!used[i]) { idx = i; break; }
+      }
+      if(idx < 0)return;
+    }
+    used[idx] = true;
+    texSlots[idx].set.value = true;
+    texSlots[idx].dynPlaceholder.value = tileIdx;
+    texSlots[idx].dynType = t.dynType;
+
+    if(t.dynType.value == Assets::MaterialTex::DYN_TYPE_TILE) {
+      // store texture size in repeat
+      texSlots[idx].repeat.value = t.texSize.value;
+    }
+  };
   for(auto &[slot, tex] : model.materials)
   {
-    auto handleTex = [&](const Assets::MaterialTex &t, int tileIdx)
-    {
-      if(t.dynType.value)
-      {
-        texSlots[slotIdx].set.value = true;
-        texSlots[slotIdx].dynPlaceholder.value = tileIdx;
-        texSlots[slotIdx].dynType = t.dynType;
-
-        if(t.dynType.value == Assets::MaterialTex::DYN_TYPE_TILE) {
-          // store texture size in repeat
-          texSlots[slotIdx].repeat.value = t.texSize.value;
-        }
-        ++slotIdx;
-      }
-    };
     handleTex(tex.tex0, 0);
-    if(slotIdx >= texSlots.size())break;
     handleTex(tex.tex1, 1);
-    if(slotIdx >= texSlots.size())break;
   }
 
-  // disable the rest of the slots
-  for(; slotIdx < texSlots.size(); ++slotIdx) {
-    texSlots[slotIdx].set.value = false;
+  // disable the unused slots
+  for(size_t i=0; i<texSlots.size(); ++i) {
+    if(!used[i])texSlots[i].set.value = false;
   }
 }

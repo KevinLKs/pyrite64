@@ -4,6 +4,10 @@
 */
 #include "modelEditor.h"
 
+#include <algorithm>
+#include <string>
+#include <vector>
+
 #include "libdragon.h"
 #include "ccMapping.h"
 #include "textureEditor.h"
@@ -386,23 +390,44 @@ bool Editor::ModelEditor::draw(ImGuiID defDockId)
   ImGui::End();
 
   // Assign placeholder slot indices, capped at the runtime slot limit.
-  uint32_t slot = 0;
+  // Fork change (2026-10-18): materials is an unordered_map, so numbering in iteration order
+  // could reshuffle slots (e.g. swap eye/mouth) just by opening the editor. Existing numbering
+  // is kept when it is already a valid 0..N-1 set; otherwise slots are renumbered in a stable
+  // order (current index, then material name, then tile).
   placeholderOverflow = false;
-  auto assignSlot = [&](Project::Assets::MaterialTex &tex) {
-    if(!tex.dynType.value)return;
-    if(slot >= (uint32_t)Project::Assets::MaterialTex::MAX_PLACEHOLDERS) {
-      tex.dynType.value = Project::Assets::MaterialTex::DYN_TYPE_NONE;
-      placeholderOverflow = true;
-      return;
-    }
-    tex.dynPlaceholder.value = slot++;
-  };
-  for(auto &entry : model->model.materials)
   {
-    auto &mat = entry.second;
-    if(!mat.isCustom.value)continue;
-    assignSlot(mat.tex0);
-    assignSlot(mat.tex1);
+    struct DynTex { int cur; std::string name; int tile; Project::Assets::MaterialTex* tex; };
+    std::vector<DynTex> dyn{};
+    for(auto &entry : model->model.materials)
+    {
+      auto &mat = entry.second;
+      if(!mat.isCustom.value)continue;
+      if(mat.tex0.dynType.value)dyn.push_back({mat.tex0.dynPlaceholder.value, entry.first, 0, &mat.tex0});
+      if(mat.tex1.dynType.value)dyn.push_back({mat.tex1.dynPlaceholder.value, entry.first, 1, &mat.tex1});
+    }
+
+    std::vector<bool> seen(dyn.size(), false);
+    bool valid = true;
+    for(auto &d : dyn) {
+      if(d.cur < 0 || d.cur >= (int)dyn.size() || seen[d.cur]) { valid = false; break; }
+      seen[d.cur] = true;
+    }
+
+    if(!valid) {
+      std::sort(dyn.begin(), dyn.end(), [](const DynTex &a, const DynTex &b) {
+        if(a.cur != b.cur)return a.cur < b.cur;
+        if(a.name != b.name)return a.name < b.name;
+        return a.tile < b.tile;
+      });
+      for(size_t i=0; i<dyn.size(); ++i)dyn[i].tex->dynPlaceholder.value = (int)i;
+    }
+
+    for(auto &d : dyn) {
+      if(d.tex->dynPlaceholder.value >= Project::Assets::MaterialTex::MAX_PLACEHOLDERS) {
+        d.tex->dynType.value = Project::Assets::MaterialTex::DYN_TYPE_NONE;
+        placeholderOverflow = true;
+      }
+    }
   }
 
   if(!matToRemove.empty())

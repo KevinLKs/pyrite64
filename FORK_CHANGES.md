@@ -1,10 +1,10 @@
 # Pyrite64 Fork: Change Notes
 
-Last updated 2026-10-02.
+Last updated 2026-10-21.
 
 ## Overview
 
-This fork makes the Pyrite64 editor stay responsive on projects with thousands of asset files, and it stops one class of crashing ROMs at build time. It changes 17 source files (about 1,200 lines added, 200 removed). Nothing in the N64 runtime (`n64/engine/`) changed, so ROM output and runtime behavior are the same as upstream.
+This fork makes the Pyrite64 editor stay responsive on projects with thousands of asset files, and it stops one class of crashing ROMs at build time. It changes 17 source files (about 1,200 lines added, 200 removed). The N64 runtime (`n64/engine/`) has one addition, two read-only getters on `AnimModel` (section 7). They change no behavior, so ROM output is the same as upstream for code that does not call them.
 
 If your project has a few dozen assets, you will mostly notice the texture picker and the build error. The speedups matter once a project holds hundreds of models and thousands of images.
 
@@ -116,6 +116,14 @@ A Material Instance slot set to "Texture" with no texture picked now fails the b
 | `src/editor/pages/parts/assets/matInstanceEditor.cpp` | Shows a red line under any Texture-mode slot with no valid texture: "No texture set, the build will stop here". | You see the problem in the inspector before you build. |
 
 **Behavior change to be aware of:** a project that built without errors on upstream, but had an empty Texture slot somewhere, will now fail to build until you pick a texture or switch the slot's mode. That ROM would have crashed when it loaded the affected scene, so this only surfaces an existing bug.
+
+## 7. Runtime: AnimModel getters (2026-10-21)
+
+| File | Change | Why |
+| --- | --- | --- |
+| `n64/engine/include/scene/components/animModel.h` | Two public inline getters: `getSkeleton()` returns the main skeleton (`skelMain`, the one that is drawn), or null before the model is set up. `getVertexScale()` returns the model's vertex scale. | Poke64 draws Stadium's creature flames at a joint of the animated model (`src/user/StadiumFlames.cpp`). It needs the joint's model-space matrix, which lives in the private skeleton, and the vertex scale to convert it to metres the way `AnimModel::draw` does. |
+
+Pyrite copies `n64/engine/` into a project's `engine/` folder on every build, so this file is where the change has to live. On an upstream merge, re-apply it if `animModel.h` changed upstream; nothing else depends on it.
 
 ## Known limits, compatibility and how to verify
 
