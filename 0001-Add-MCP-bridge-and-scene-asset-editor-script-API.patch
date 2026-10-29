@@ -1,0 +1,1544 @@
+From 88cbee86f25aa37fb825d65e689549eff4ff4fa4 Mon Sep 17 00:00:00 2001
+From: Kevin <kevinasims86@gmail.com>
+Date: Thu, 29 Oct 2026 06:51:30 -0700
+Subject: [PATCH] Add MCP bridge and scene/asset editor-script API
+
+- src/editor/mcpBridge: localhost TCP bridge (port 6464, PYRITE_MCP_PORT) that runs
+  editor scripts on the main thread, inside undo begin/end
+- src/editor/script/impl/sceneApi.cpp: scene.*, assets.*, components.*,
+  console.read, editor.isBuilding for editor scripts
+- tools/mcp: Python MCP server exposing the editor to MCP clients
+---
+ CMakeLists.txt                      |   8 +
+ src/editor/mcpBridge.cpp            | 249 +++++++++++++
+ src/editor/mcpBridge.h              |  30 ++
+ src/editor/script/impl/impl.h       |   8 +
+ src/editor/script/impl/object.cpp   |   5 +
+ src/editor/script/impl/sceneApi.cpp | 545 ++++++++++++++++++++++++++++
+ src/editor/script/scriptHost.cpp    |   2 +
+ src/main.cpp                        |  14 +
+ tools/mcp/.gitignore                |   1 +
+ tools/mcp/README.md                 |  67 ++++
+ tools/mcp/pyrite_mcp.py             | 445 +++++++++++++++++++++++
+ tools/mcp/requirements.txt          |   1 +
+ 12 files changed, 1375 insertions(+)
+ create mode 100644 src/editor/mcpBridge.cpp
+ create mode 100644 src/editor/mcpBridge.h
+ create mode 100644 src/editor/script/impl/sceneApi.cpp
+ create mode 100644 tools/mcp/.gitignore
+ create mode 100644 tools/mcp/README.md
+ create mode 100644 tools/mcp/pyrite_mcp.py
+ create mode 100644 tools/mcp/requirements.txt
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6b8e724..6556f27 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -300,6 +300,9 @@ add_executable(pyrite64 src/main.cpp
+         src/editor/script/impl/object.cpp
+         src/editor/script/impl/vec.cpp
+         src/editor/script/impl/quat.cpp
++        src/editor/script/impl/sceneApi.cpp
++        src/editor/mcpBridge.h
++        src/editor/mcpBridge.cpp
+         src/editor/actionSearch.h
+         src/editor/actionSearch.cpp
+         src/project/graph/valueTypes.h
+@@ -412,6 +415,11 @@ target_link_libraries(pyrite64 PRIVATE
+     qjs
+ )
+ 
++# sockets for the MCP bridge (src/editor/mcpBridge.cpp)
++if(WIN32)
++    target_link_libraries(pyrite64 PRIVATE ws2_32)
++endif()
++
+ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+     target_compile_definitions(pyrite64 PRIVATE "HAS_SHADER_CROSS=1")
+     target_link_libraries(pyrite64 PRIVATE
+diff --git a/src/editor/mcpBridge.cpp b/src/editor/mcpBridge.cpp
+new file mode 100644
+index 0000000..6d78156
+--- /dev/null
++++ b/src/editor/mcpBridge.cpp
+@@ -0,0 +1,249 @@
++/**
++* @license MIT
++*/
++#include "mcpBridge.h"
++#include "script/scriptHost.h"
++#include "../utils/logger.h"
++#include "json.hpp"
++
++#include <atomic>
++#include <chrono>
++#include <cstdlib>
++#include <deque>
++#include <future>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++
++#ifdef _WIN32
++  #ifndef WIN32_LEAN_AND_MEAN
++    #define WIN32_LEAN_AND_MEAN
++  #endif
++  #include <winsock2.h>
++  #include <ws2tcpip.h>
++  using SocketT = SOCKET;
++  constexpr SocketT INVALID_SOCK = INVALID_SOCKET;
++  inline void closeSock(SocketT s) { closesocket(s); }
++#else
++  #include <arpa/inet.h>
++  #include <netinet/in.h>
++  #include <sys/socket.h>
++  #include <unistd.h>
++  using SocketT = int;
++  constexpr SocketT INVALID_SOCK = -1;
++  inline void closeSock(SocketT s) { ::close(s); }
++#endif
++
++namespace
++{
++  constexpr int DEFAULT_PORT = 6464;
++  constexpr auto EVAL_TIMEOUT = std::chrono::seconds(30);
++  constexpr size_t MAX_LINE = 8 * 1024 * 1024;
++
++  struct Job
++  {
++    std::string code{};
++    std::promise<Editor::ScriptHost::EvalResult> result{};
++  };
++
++  std::mutex jobMutex{};
++  std::deque<std::shared_ptr<Job>> jobs{};
++
++  std::thread netThread{};
++  std::atomic_bool running{false};
++  std::atomic<SocketT> listenSock{INVALID_SOCK};
++  std::atomic<SocketT> clientSock{INVALID_SOCK};
++  int port{0};
++
++  bool sendAll(SocketT s, const std::string &data)
++  {
++    size_t sent = 0;
++    while(sent < data.size()) {
++      auto n = ::send(s, data.data() + sent, (int)(data.size() - sent), 0);
++      if(n <= 0)return false;
++      sent += (size_t)n;
++    }
++    return true;
++  }
++
++  std::string handleRequest(const std::string &line)
++  {
++    nlohmann::json res{};
++    auto req = nlohmann::json::parse(line, nullptr, false);
++    if(req.is_discarded() || !req.is_object()) {
++      res["ok"] = false;
++      res["result"] = "invalid JSON request";
++      return res.dump() + "\n";
++    }
++    res["id"] = req.contains("id") ? req["id"] : nlohmann::json{};
++
++    if(req.value("op", "") == "ping") {
++      res["ok"] = true;
++      res["result"] = "pong";
++      return res.dump() + "\n";
++    }
++
++    auto job = std::make_shared<Job>();
++    job->code = req.value("code", "");
++    auto future = job->result.get_future();
++    {
++      std::lock_guard lock{jobMutex};
++      jobs.push_back(job);
++    }
++
++    if(future.wait_for(EVAL_TIMEOUT) != std::future_status::ready) {
++      res["ok"] = false;
++      res["result"] = "timed out waiting for the editor (is it minimized, frozen or showing a modal?)";
++    } else {
++      auto evalRes = future.get();
++      res["ok"] = evalRes.success;
++      res["result"] = evalRes.text;
++    }
++    return res.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
++  }
++
++  void serveClient(SocketT s)
++  {
++    std::string buffer{};
++    char chunk[4096];
++    while(running) {
++      auto n = ::recv(s, chunk, sizeof(chunk), 0);
++      if(n <= 0)break;
++      buffer.append(chunk, (size_t)n);
++      if(buffer.size() > MAX_LINE) {
++        sendAll(s, R"({"ok":false,"result":"request too large"})" "\n");
++        break;
++      }
++
++      size_t pos;
++      while((pos = buffer.find('\n')) != std::string::npos) {
++        std::string line = buffer.substr(0, pos);
++        buffer.erase(0, pos + 1);
++        if(!line.empty() && line.back() == '\r')line.pop_back();
++        if(line.empty())continue;
++        if(!sendAll(s, handleRequest(line)))return;
++      }
++    }
++  }
++
++  void netLoop()
++  {
++    while(running) {
++      sockaddr_in addr{};
++      socklen_t addrLen = sizeof(addr);
++      SocketT s = ::accept(listenSock, (sockaddr*)&addr, &addrLen);
++      if(s == INVALID_SOCK)continue; // stop() closes the listen socket to break out
++      clientSock = s;
++      serveClient(s);
++      clientSock = INVALID_SOCK;
++      closeSock(s);
++    }
++  }
++}
++
++namespace Editor::McpBridge
++{
++  void start()
++  {
++    if(running)return;
++
++    port = DEFAULT_PORT;
++    if(const char *env = std::getenv("PYRITE_MCP_PORT")) {
++      port = std::atoi(env);
++    }
++    if(port <= 0) {
++      Utils::Logger::log("MCP bridge disabled (PYRITE_MCP_PORT=0)");
++      return;
++    }
++
++    #ifdef _WIN32
++      WSADATA wsa{};
++      if(WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
++        Utils::Logger::log("MCP bridge: WSAStartup failed", Utils::Logger::LEVEL_ERROR);
++        return;
++      }
++    #endif
++
++    SocketT s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++    if(s == INVALID_SOCK) {
++      Utils::Logger::log("MCP bridge: could not create socket", Utils::Logger::LEVEL_ERROR);
++      return;
++    }
++
++    sockaddr_in addr{};
++    addr.sin_family = AF_INET;
++    addr.sin_port = htons((uint16_t)port);
++    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // local machine only
++
++    if(::bind(s, (sockaddr*)&addr, sizeof(addr)) != 0 || ::listen(s, 1) != 0) {
++      Utils::Logger::log("MCP bridge: port " + std::to_string(port)
++        + " is in use (another editor open?), bridge disabled", Utils::Logger::LEVEL_WARN);
++      closeSock(s);
++      return;
++    }
++
++    listenSock = s;
++    running = true;
++    netThread = std::thread(netLoop);
++    Utils::Logger::log("MCP bridge listening on 127.0.0.1:" + std::to_string(port));
++  }
++
++  void stop()
++  {
++    if(!running)return;
++    running = false;
++
++    // unblock accept() / recv()
++    SocketT ls = listenSock.exchange(INVALID_SOCK);
++    if(ls != INVALID_SOCK) {
++      #ifndef _WIN32
++        ::shutdown(ls, SHUT_RDWR);
++      #endif
++      closeSock(ls);
++    }
++    SocketT cs = clientSock.load();
++    if(cs != INVALID_SOCK) {
++      #ifdef _WIN32
++        ::shutdown(cs, SD_BOTH);
++      #else
++        ::shutdown(cs, SHUT_RDWR);
++      #endif
++    }
++
++    // fail pending jobs so the network thread isn't left waiting
++    {
++      std::lock_guard lock{jobMutex};
++      for(auto &job : jobs)job->result.set_value({"editor is shutting down", false});
++      jobs.clear();
++    }
++
++    if(netThread.joinable())netThread.join();
++
++    #ifdef _WIN32
++      WSACleanup();
++    #endif
++  }
++
++  void poll()
++  {
++    if(!running)return;
++
++    std::deque<std::shared_ptr<Job>> pending{};
++    {
++      std::lock_guard lock{jobMutex};
++      pending.swap(jobs);
++    }
++
++    for(auto &job : pending) {
++      if(!ScriptHost::isRunning()) {
++        job->result.set_value({"No project is open in the editor", false});
++        continue;
++      }
++      job->result.set_value(ScriptHost::eval(job->code, "<mcp>"));
++    }
++  }
++
++  bool isListening() { return running; }
++  int getPort() { return port; }
++}
+diff --git a/src/editor/mcpBridge.h b/src/editor/mcpBridge.h
+new file mode 100644
+index 0000000..cadd0d0
+--- /dev/null
++++ b/src/editor/mcpBridge.h
+@@ -0,0 +1,30 @@
++/**
++* @license MIT
++*/
++#pragma once
++
++/**
++ * Local bridge that lets external tools (e.g. an MCP server for AI assistants)
++ * run editor scripts while the editor is open.
++ *
++ * Listens on 127.0.0.1 only. Protocol: newline-delimited JSON.
++ *   request:  {"id": 1, "code": "scene.current()"}
++ *             {"id": 2, "op": "ping"}
++ *   response: {"id": 1, "ok": true, "result": "<text or JSON string>"}
++ *
++ * Network I/O runs on a background thread, but every script is evaluated on the
++ * main thread inside poll(), so scripts can safely touch the scene and project.
++ *
++ * Port: 6464 by default, override with env PYRITE_MCP_PORT, set it to 0 to disable.
++ */
++namespace Editor::McpBridge
++{
++  void start();
++  void stop();
++
++  // Runs queued requests, call once per frame from the main thread.
++  void poll();
++
++  [[nodiscard]] bool isListening();
++  [[nodiscard]] int getPort();
++}
+diff --git a/src/editor/script/impl/impl.h b/src/editor/script/impl/impl.h
+index fbbaf53..3f98dbf 100644
+--- a/src/editor/script/impl/impl.h
++++ b/src/editor/script/impl/impl.h
+@@ -37,6 +37,14 @@ namespace Editor::ScriptHost::Impl
+   // In JS: editor.getSelectedObjects()
+   JSValue getSelectedObjects(JSContext *c, JSValueConst thisVal, int argc, JSValueConst *argv);
+ 
++  // Creates a SceneObject handle for a scene object UUID
++  JSValue wrapObject(JSContext *c, uint32_t uuid);
++
++  //########// Scene / Asset API (sceneApi.cpp) //########//
++
++  // Adds scene.*, assets.*, components.*, console.read and editor.isBuilding
++  void initSceneApi(JSContext *c);
++
+   //########// Math Types //########//
+ 
+   struct Vec3
+diff --git a/src/editor/script/impl/object.cpp b/src/editor/script/impl/object.cpp
+index de812f2..01c60d5 100644
+--- a/src/editor/script/impl/object.cpp
++++ b/src/editor/script/impl/object.cpp
+@@ -136,3 +136,8 @@ JSValue Editor::ScriptHost::Impl::getSelectedObjects(JSContext *c, JSValueConst,
+   }
+   return arr;
+ }
++
++JSValue Editor::ScriptHost::Impl::wrapObject(JSContext *c, uint32_t uuid)
++{
++  return newObjectHandle(c, uuid);
++}
+diff --git a/src/editor/script/impl/sceneApi.cpp b/src/editor/script/impl/sceneApi.cpp
+new file mode 100644
+index 0000000..ddb0b12
+--- /dev/null
++++ b/src/editor/script/impl/sceneApi.cpp
+@@ -0,0 +1,545 @@
++/**
++* @license MIT
++*
++* Extra editor-script API used by the MCP bridge (and usable from any editor script):
++*   scene.list() / scene.current() / scene.objects(rootUUID?, maxDepth?) / scene.find(text)
++*   scene.get(uuid) / scene.create(name, parentUUID?) / scene.addModel(assetUUID)
++*   scene.addPrefab(assetUUID) / scene.addJSON(json, parentUUID?) / scene.serialize(uuid)
++*   scene.remove(uuid) / scene.move(uuid, targetUUID, asChild?) / scene.select(uuids)
++*   scene.setEnabled(uuid, bool) / scene.addComponent(uuid, idOrName) / scene.removeComponent(uuid, compUUID)
++*   assets.list(type?) / assets.get(uuid)
++*   components.list()
++*   console.read(maxChars?)
++*   editor.isBuilding()
++*
++* Asset UUIDs are 64-bit and returned as strings (JS numbers can't hold them),
++* any function taking an asset UUID accepts a string or a number.
++*/
++#include "impl.h"
++#include "../scriptUtils.h"
++#include "../../../context.h"
++#include "../../../project/scene/object.h"
++#include "../../../project/scene/scene.h"
++#include "../../../project/assetManager.h"
++#include "../../../project/component/components.h"
++#include "../../../utils/logger.h"
++#include "json.hpp"
++
++#include <algorithm>
++#include <cctype>
++#include <cstdlib>
++#include <string>
++
++using namespace Editor::ScriptHost;
++using Json = nlohmann::json;
++
++namespace
++{
++  Project::Scene* getScene(JSContext *c)
++  {
++    auto *scene = ctx.project ? ctx.project->getScenes().getLoadedScene() : nullptr;
++    if(!scene)JS_ThrowReferenceError(c, "no scene loaded");
++    return scene;
++  }
++
++  bool readU32(JSContext *c, JSValueConst v, uint32_t &out)
++  {
++    if(JS_IsString(v)) {
++      out = (uint32_t)std::strtoul(toString(v, c).c_str(), nullptr, 10);
++      return true;
++    }
++    return JS_ToUint32(c, &out, v) == 0;
++  }
++
++  bool readU64(JSContext *c, JSValueConst v, uint64_t &out)
++  {
++    if(JS_IsString(v)) {
++      out = std::strtoull(toString(v, c).c_str(), nullptr, 10);
++      return true;
++    }
++    if(JS_IsBigInt(v)) {
++      int64_t tmp{};
++      if(JS_ToBigInt64(c, &tmp, v) != 0)return false;
++      out = (uint64_t)tmp;
++      return true;
++    }
++    double d{};
++    if(JS_ToFloat64(c, &d, v) != 0)return false;
++    out = (uint64_t)d;
++    return true;
++  }
++
++  std::string lower(std::string s)
++  {
++    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char ch){ return (char)std::tolower(ch); });
++    return s;
++  }
++
++  JSValue fromJson(JSContext *c, const Json &j)
++  {
++    auto str = j.dump(-1, ' ', false, Json::error_handler_t::replace);
++    return JS_ParseJSON(c, str.c_str(), str.size(), "<json>");
++  }
++
++  const char* fileTypeName(Project::FileType t)
++  {
++    using FT = Project::FileType;
++    switch(t) {
++      case FT::IMAGE: return "image";
++      case FT::AUDIO: return "audio";
++      case FT::FONT: return "font";
++      case FT::MODEL_3D: return "model";
++      case FT::CODE_OBJ: return "code_object";
++      case FT::CODE_GLOBAL: return "code_global";
++      case FT::PREFAB: return "prefab";
++      case FT::NODE_GRAPH: return "node_graph";
++      case FT::MUSIC_XM: return "music";
++      case FT::EDITOR_SCRIPT: return "editor_script";
++      default: return "unknown";
++    }
++  }
++
++  const char* compName(int id)
++  {
++    for(auto &info : Project::Component::TABLE) {
++      if(info.id == id)return info.name;
++    }
++    return "?";
++  }
++
++  // returns -1 if not found
++  int findCompId(JSContext *c, JSValueConst v)
++  {
++    if(JS_IsNumber(v)) {
++      int32_t id{};
++      JS_ToInt32(c, &id, v);
++      for(auto &info : Project::Component::TABLE) if(info.id == id)return id;
++      return -1;
++    }
++    auto name = lower(toString(v, c));
++    for(auto &info : Project::Component::TABLE) {
++      if(lower(info.name) == name)return info.id;
++    }
++    // loose match, e.g. "animated" -> "Model (Animated)"
++    for(auto &info : Project::Component::TABLE) {
++      if(lower(info.name).find(name) != std::string::npos)return info.id;
++    }
++    return -1;
++  }
++
++  Json objSummary(Project::Object &obj, int depth, int maxDepth)
++  {
++    auto t = obj.getAuthoredTrans();
++    Json j{
++      {"uuid", obj.uuid},
++      {"name", obj.name},
++      {"enabled", obj.enabled},
++      {"pos", {t.pos.x, t.pos.y, t.pos.z}},
++      {"rot", {t.rot.x, t.rot.y, t.rot.z, t.rot.w}},
++      {"scale", {t.scale.x, t.scale.y, t.scale.z}},
++    };
++    if(obj.isPrefabInstance())j["prefab"] = std::to_string(obj.uuidPrefab.value);
++
++    Json comps = Json::array();
++    for(auto &comp : obj.components) {
++      comps.push_back(Json{{"uuid", std::to_string(comp.uuid)}, {"type", compName(comp.id)}, {"name", comp.name}});
++    }
++    j["components"] = comps;
++
++    if(!obj.children.empty()) {
++      if(maxDepth >= 0 && depth >= maxDepth) {
++        j["childCount"] = obj.children.size();
++      } else {
++        Json kids = Json::array();
++        for(auto &child : obj.children)kids.push_back(objSummary(*child, depth + 1, maxDepth));
++        j["children"] = kids;
++      }
++    }
++    return j;
++  }
++
++  Json assetSummary(const Project::AssetManagerEntry &e)
++  {
++    return Json{
++      {"uuid", std::to_string(e.getUUID())},
++      {"name", e.name},
++      {"path", e.projectPath},
++      {"type", fileTypeName(e.type)},
++    };
++  }
++
++  // removes the object and all its children from the scene's lookup map
++  void forgetRecursive(Project::Scene &scene, Project::Object &obj)
++  {
++    for(auto &child : obj.children)forgetRecursive(scene, *child);
++    scene.objectsMap.erase(obj.uuid);
++  }
++
++  //########// scene //########//
++
++  JSValue sceneList(JSContext *c, JSValueConst, int, JSValueConst*)
++  {
++    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
++    Json arr = Json::array();
++    for(auto &e : ctx.project->getScenes().getEntries()) {
++      arr.push_back(Json{{"id", e.id}, {"name", e.name}});
++    }
++    return fromJson(c, arr);
++  }
++
++  JSValue sceneCurrent(JSContext *c, JSValueConst, int, JSValueConst*)
++  {
++    auto *scene = ctx.project ? ctx.project->getScenes().getLoadedScene() : nullptr;
++    if(!scene)return JS_NULL;
++    return fromJson(c, Json{
++      {"id", scene->getId()},
++      {"name", scene->getName()},
++      {"objectCount", scene->objectsMap.size()},
++    });
++  }
++
++  JSValue sceneObjects(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++
++    uint32_t rootUUID = 0;
++    int32_t maxDepth = -1;
++    if(argc > 0 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]) && !readU32(c, argv[0], rootUUID))return JS_EXCEPTION;
++    if(argc > 1 && !JS_IsUndefined(argv[1]) && JS_ToInt32(c, &maxDepth, argv[1]) != 0)return JS_EXCEPTION;
++
++    if(rootUUID) {
++      auto obj = scene->getObjectByUUID(rootUUID);
++      if(!obj)return JS_ThrowReferenceError(c, "object %u not found", rootUUID);
++      return fromJson(c, objSummary(*obj, 0, maxDepth));
++    }
++
++    Json arr = Json::array();
++    for(auto &child : scene->getRootObject().children) {
++      arr.push_back(objSummary(*child, 0, maxDepth));
++    }
++    return fromJson(c, arr);
++  }
++
++  JSValue sceneFind(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    auto needle = argc > 0 ? lower(toString(argv[0], c)) : std::string{};
++
++    JSValue arr = JS_NewArray(c);
++    uint32_t idx = 0;
++    for(auto &[uuid, obj] : scene->objectsMap) {
++      if(!obj)continue;
++      if(needle.empty() || lower(obj->name).find(needle) != std::string::npos) {
++        JS_SetPropertyUint32(c, arr, idx++, Impl::wrapObject(c, uuid));
++      }
++    }
++    return arr;
++  }
++
++  JSValue sceneGet(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    uint32_t uuid{};
++    if(argc < 1 || !readU32(c, argv[0], uuid))return JS_ThrowTypeError(c, "get expects (uuid)");
++    if(!scene->getObjectByUUID(uuid))return JS_NULL;
++    return Impl::wrapObject(c, uuid);
++  }
++
++  JSValue sceneCreate(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++
++    Project::Object *parent = &scene->getRootObject();
++    uint32_t parentUUID = 0;
++    if(argc > 1 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
++      if(!readU32(c, argv[1], parentUUID))return JS_EXCEPTION;
++      if(parentUUID) {
++        auto p = scene->getObjectByUUID(parentUUID);
++        if(!p)return JS_ThrowReferenceError(c, "parent %u not found", parentUUID);
++        parent = p.get();
++      }
++    }
++
++    auto obj = scene->addObject(*parent);
++    if(argc > 0 && JS_IsString(argv[0]))obj->name = toString(argv[0], c);
++    return Impl::wrapObject(c, obj->uuid);
++  }
++
++  JSValue sceneAddModel(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    uint64_t assetUUID{};
++    if(argc < 1 || !readU64(c, argv[0], assetUUID))return JS_ThrowTypeError(c, "addModel expects (assetUUID)");
++    auto obj = scene->addModelObject(assetUUID);
++    if(!obj)return JS_ThrowReferenceError(c, "asset is not a 3D model");
++    return Impl::wrapObject(c, obj->uuid);
++  }
++
++  JSValue sceneAddPrefab(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    uint64_t assetUUID{};
++    if(argc < 1 || !readU64(c, argv[0], assetUUID))return JS_ThrowTypeError(c, "addPrefab expects (assetUUID)");
++    auto obj = scene->addPrefabInstance(assetUUID);
++    if(!obj)return JS_ThrowReferenceError(c, "asset is not a prefab");
++    return Impl::wrapObject(c, obj->uuid);
++  }
++
++  JSValue sceneAddJSON(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    if(argc < 1)return JS_ThrowTypeError(c, "addJSON expects (json, parentUUID?)");
++
++    std::string text{};
++    if(JS_IsString(argv[0])) {
++      text = toString(argv[0], c);
++    } else {
++      JSValue str = JS_JSONStringify(c, argv[0], JS_UNDEFINED, JS_UNDEFINED);
++      if(JS_IsException(str))return str;
++      text = toString(str, c);
++      JS_FreeValue(c, str);
++    }
++    auto parsed = Json::parse(text, nullptr, false);
++    if(parsed.is_discarded() || !parsed.is_object())return JS_ThrowTypeError(c, "invalid object JSON");
++
++    uint32_t parentUUID = 0;
++    if(argc > 1 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) && !readU32(c, argv[1], parentUUID))return JS_EXCEPTION;
++    if(parentUUID && !scene->getObjectByUUID(parentUUID))return JS_ThrowReferenceError(c, "parent %u not found", parentUUID);
++
++    auto obj = scene->addObject(text, parentUUID);
++    return Impl::wrapObject(c, obj->uuid);
++  }
++
++  JSValue sceneSerialize(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    uint32_t uuid{};
++    if(argc < 1 || !readU32(c, argv[0], uuid))return JS_ThrowTypeError(c, "serialize expects (uuid)");
++    auto obj = scene->getObjectByUUID(uuid);
++    if(!obj)return JS_ThrowReferenceError(c, "object %u not found", uuid);
++    return fromJson(c, obj->serialize());
++  }
++
++  JSValue sceneRemove(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    uint32_t uuid{};
++    if(argc < 1 || !readU32(c, argv[0], uuid))return JS_ThrowTypeError(c, "remove expects (uuid)");
++    auto obj = scene->getObjectByUUID(uuid);
++    if(!obj || !obj->parent)return JS_FALSE;
++
++    for(auto &child : obj->children)forgetRecursive(*scene, *child);
++    scene->removeObject(*obj);
++    ctx.sanitizeObjectSelection(scene);
++    return JS_TRUE;
++  }
++
++  JSValue sceneMove(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    uint32_t uuid{}, target{};
++    if(argc < 2 || !readU32(c, argv[0], uuid) || !readU32(c, argv[1], target)) {
++      return JS_ThrowTypeError(c, "move expects (uuid, targetUUID, asChild = true)");
++    }
++    bool asChild = argc > 2 ? JS_ToBool(c, argv[2]) : true;
++    // the scene root has uuid 0
++    if(target == 0)target = scene->getRootObject().uuid;
++    return JS_NewBool(c, scene->moveObject(uuid, target, asChild));
++  }
++
++  JSValue sceneSelect(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    std::vector<uint32_t> uuids{};
++    if(argc > 0 && JS_IsArray(argv[0])) {
++      int64_t len{};
++      JS_GetLength(c, argv[0], &len);
++      for(int64_t i = 0; i < len; ++i) {
++        JSValue v = JS_GetPropertyInt64(c, argv[0], i);
++        uint32_t uuid{};
++        if(readU32(c, v, uuid) && scene->getObjectByUUID(uuid))uuids.push_back(uuid);
++        JS_FreeValue(c, v);
++      }
++    } else if(argc > 0) {
++      uint32_t uuid{};
++      if(readU32(c, argv[0], uuid) && scene->getObjectByUUID(uuid))uuids.push_back(uuid);
++    }
++    ctx.setObjectSelectionList(uuids, uuids.empty() ? 0 : uuids.back());
++    return JS_NewUint32(c, (uint32_t)uuids.size());
++  }
++
++  JSValue sceneSetEnabled(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    uint32_t uuid{};
++    if(argc < 2 || !readU32(c, argv[0], uuid))return JS_ThrowTypeError(c, "setEnabled expects (uuid, bool)");
++    auto obj = scene->getObjectByUUID(uuid);
++    if(!obj)return JS_ThrowReferenceError(c, "object %u not found", uuid);
++    obj->enabled = JS_ToBool(c, argv[1]);
++    return JS_UNDEFINED;
++  }
++
++  JSValue sceneAddComponent(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    uint32_t uuid{};
++    if(argc < 2 || !readU32(c, argv[0], uuid))return JS_ThrowTypeError(c, "addComponent expects (uuid, idOrName)");
++    auto obj = scene->getObjectByUUID(uuid);
++    if(!obj)return JS_ThrowReferenceError(c, "object %u not found", uuid);
++    int compId = findCompId(c, argv[1]);
++    if(compId < 0)return JS_ThrowTypeError(c, "unknown component, see components.list()");
++    obj->addComponent(compId);
++    return JS_NewString(c, std::to_string(obj->components.back().uuid).c_str());
++  }
++
++  JSValue sceneRemoveComponent(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    auto *scene = getScene(c);
++    if(!scene)return JS_EXCEPTION;
++    uint32_t uuid{};
++    uint64_t compUUID{};
++    if(argc < 2 || !readU32(c, argv[0], uuid) || !readU64(c, argv[1], compUUID)) {
++      return JS_ThrowTypeError(c, "removeComponent expects (uuid, componentUUID)");
++    }
++    auto obj = scene->getObjectByUUID(uuid);
++    if(!obj)return JS_ThrowReferenceError(c, "object %u not found", uuid);
++    obj->removeComponent(compUUID);
++    return JS_UNDEFINED;
++  }
++
++  //########// assets //########//
++
++  JSValue assetsList(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
++    auto filter = argc > 0 && JS_IsString(argv[0]) ? lower(toString(argv[0], c)) : std::string{};
++
++    Json arr = Json::array();
++    for(auto &typeEntries : ctx.project->getAssets().getEntries()) {
++      for(auto &e : typeEntries) {
++        if(!filter.empty() && filter != fileTypeName(e.type))continue;
++        arr.push_back(assetSummary(e));
++      }
++    }
++    return fromJson(c, arr);
++  }
++
++  JSValue assetsGet(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
++    uint64_t uuid{};
++    if(argc < 1 || !readU64(c, argv[0], uuid))return JS_ThrowTypeError(c, "get expects (assetUUID)");
++    auto *e = ctx.project->getAssets().getEntryByUUID(uuid);
++    if(!e)return JS_NULL;
++    auto j = assetSummary(*e);
++    if(e->type == Project::FileType::MODEL_3D) {
++      Json anims = Json::array();
++      for(auto &anim : e->model.t3dm.animations)anims.push_back(anim.name);
++      j["animations"] = anims;
++    }
++    return fromJson(c, j);
++  }
++
++  //########// misc //########//
++
++  JSValue componentsList(JSContext *c, JSValueConst, int, JSValueConst*)
++  {
++    Json arr = Json::array();
++    for(auto &info : Project::Component::TABLE) {
++      arr.push_back(Json{{"id", info.id}, {"name", info.name}});
++    }
++    return fromJson(c, arr);
++  }
++
++  JSValue consoleRead(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
++  {
++    int32_t maxChars = 4000;
++    if(argc > 0)JS_ToInt32(c, &maxChars, argv[0]);
++    const auto &log = Utils::Logger::getLogStripped();
++    if(maxChars > 0 && log.size() > (size_t)maxChars) {
++      auto tail = log.substr(log.size() - (size_t)maxChars);
++      return JS_NewStringLen(c, tail.data(), tail.size());
++    }
++    return JS_NewStringLen(c, log.data(), log.size());
++  }
++
++  JSValue editorIsBuilding(JSContext *c, JSValueConst, int, JSValueConst*)
++  {
++    return JS_NewBool(c, ctx.isBuildOrRunning());
++  }
++
++  const JSCFunctionListEntry SCENE_FUNCS[] = {
++    JS_CFUNC_DEF("list", 0, sceneList),
++    JS_CFUNC_DEF("current", 0, sceneCurrent),
++    JS_CFUNC_DEF("objects", 2, sceneObjects),
++    JS_CFUNC_DEF("find", 1, sceneFind),
++    JS_CFUNC_DEF("get", 1, sceneGet),
++    JS_CFUNC_DEF("create", 2, sceneCreate),
++    JS_CFUNC_DEF("addModel", 1, sceneAddModel),
++    JS_CFUNC_DEF("addPrefab", 1, sceneAddPrefab),
++    JS_CFUNC_DEF("addJSON", 2, sceneAddJSON),
++    JS_CFUNC_DEF("serialize", 1, sceneSerialize),
++    JS_CFUNC_DEF("remove", 1, sceneRemove),
++    JS_CFUNC_DEF("move", 3, sceneMove),
++    JS_CFUNC_DEF("select", 1, sceneSelect),
++    JS_CFUNC_DEF("setEnabled", 2, sceneSetEnabled),
++    JS_CFUNC_DEF("addComponent", 2, sceneAddComponent),
++    JS_CFUNC_DEF("removeComponent", 2, sceneRemoveComponent),
++  };
++
++  const JSCFunctionListEntry ASSET_FUNCS[] = {
++    JS_CFUNC_DEF("list", 1, assetsList),
++    JS_CFUNC_DEF("get", 1, assetsGet),
++  };
++
++  const JSCFunctionListEntry COMPONENT_FUNCS[] = {
++    JS_CFUNC_DEF("list", 0, componentsList),
++  };
++
++  const JSCFunctionListEntry CONSOLE_FUNCS[] = {
++    JS_CFUNC_DEF("read", 1, consoleRead),
++  };
++
++  const JSCFunctionListEntry EDITOR_FUNCS[] = {
++    JS_CFUNC_DEF("isBuilding", 0, editorIsBuilding),
++  };
++
++  // adds functions to an existing global object, or creates it
++  void extendGlobal(JSContext *c, JSValue global, const char *name, const JSCFunctionListEntry *funcs, int count)
++  {
++    JSValue obj = JS_GetPropertyStr(c, global, name);
++    if(!JS_IsObject(obj)) {
++      JS_FreeValue(c, obj);
++      obj = JS_NewObject(c);
++      JS_SetPropertyFunctionList(c, obj, funcs, count);
++      JS_SetPropertyStr(c, global, name, obj); // takes ownership
++      return;
++    }
++    JS_SetPropertyFunctionList(c, obj, funcs, count);
++    JS_FreeValue(c, obj);
++  }
++}
++
++void Editor::ScriptHost::Impl::initSceneApi(JSContext *c)
++{
++  JSValue global = JS_GetGlobalObject(c);
++  extendGlobal(c, global, "scene", SCENE_FUNCS, (int)std::size(SCENE_FUNCS));
++  extendGlobal(c, global, "assets", ASSET_FUNCS, (int)std::size(ASSET_FUNCS));
++  extendGlobal(c, global, "components", COMPONENT_FUNCS, (int)std::size(COMPONENT_FUNCS));
++  extendGlobal(c, global, "console", CONSOLE_FUNCS, (int)std::size(CONSOLE_FUNCS));
++  extendGlobal(c, global, "editor", EDITOR_FUNCS, (int)std::size(EDITOR_FUNCS));
++  JS_FreeValue(c, global);
++}
+diff --git a/src/editor/script/scriptHost.cpp b/src/editor/script/scriptHost.cpp
+index 97f974c..8c03e4f 100644
+--- a/src/editor/script/scriptHost.cpp
++++ b/src/editor/script/scriptHost.cpp
+@@ -135,6 +135,8 @@ namespace Editor::ScriptHost
+ 
+     JS_FreeValue(js.ctx, global);
+ 
++    Impl::initSceneApi(js.ctx);
++
+     Utils::Logger::log("Editor scripts: context started");
+ 
+     for(auto &entry : project.getAssets().getTypeEntries(Project::FileType::EDITOR_SCRIPT)) {
+diff --git a/src/main.cpp b/src/main.cpp
+index 05ec872..44e77c4 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -17,6 +17,7 @@
+ #include "build/projectBuilder.h"
+ #include "editor/actions.h"
+ #include "editor/actionSearch.h"
++#include "editor/mcpBridge.h"
+ #include "editor/script/scriptHost.h"
+ #include "editor/window.h"
+ #include "editor/imgui/theme.h"
+@@ -297,6 +298,8 @@ int main(int argc, char** argv)
+     }
+ 
+     // Main loop
++    Editor::McpBridge::start();
++
+     bool done = false;
+     float lastPinch = 1.0f;
+     while(!done) {
+@@ -397,6 +400,14 @@ int main(int argc, char** argv)
+       updateWindowTitle();
+ 
+       if(SDL_GetWindowFlags(ctx.window) & SDL_WINDOW_MINIMIZED) {
++        // keep serving bridge requests while minimized
++        if (ctx.project) {
++          Editor::UndoRedo::getHistory().begin();
++          Editor::McpBridge::poll();
++          Editor::UndoRedo::getHistory().end();
++        } else {
++          Editor::McpBridge::poll();
++        }
+         SDL_Delay(10);
+         continue;
+       }
+@@ -442,11 +453,13 @@ int main(int argc, char** argv)
+ 
+       if (ctx.project) {
+         Editor::UndoRedo::getHistory().begin();
++        Editor::McpBridge::poll(); // inside begin/end so script edits are undoable
+         ctx.editorScene->draw();
+         Editor::UndoRedo::getHistory().end();
+         // asks before scene/prefab files are upgraded, see Project::Migration
+         Editor::MigrationOverlay::draw();
+       } else {
++        Editor::McpBridge::poll(); // answers "no project open"
+         editorMain.draw();
+       }
+ 
+@@ -503,6 +516,7 @@ int main(int argc, char** argv)
+   updateCheckThread.join();
+   SDL_WaitForGPUIdle(ctx.gpu);
+ 
++  Editor::McpBridge::stop();
+   ImGui_ImplSDL3_Shutdown();
+   ImGui_ImplSDLGPU3_Shutdown();
+   ImGui::DestroyContext();
+diff --git a/tools/mcp/.gitignore b/tools/mcp/.gitignore
+new file mode 100644
+index 0000000..c18dd8d
+--- /dev/null
++++ b/tools/mcp/.gitignore
+@@ -0,0 +1 @@
++__pycache__/
+diff --git a/tools/mcp/README.md b/tools/mcp/README.md
+new file mode 100644
+index 0000000..ffbac68
+--- /dev/null
++++ b/tools/mcp/README.md
+@@ -0,0 +1,67 @@
++# Pyrite64 MCP server
++
++Lets an MCP client (Claude Desktop, Claude Code and others) look at and edit the scene that is open in a running Pyrite64 editor: list objects and assets, place models and prefabs, move things around, add components, save and build.
++
++## How it works
++
++1. The editor starts a small bridge on `127.0.0.1:6464` (local machine only). It takes editor-script JavaScript, runs it on the editor's main thread and sends back the result.
++2. `pyrite_mcp.py` is the MCP server. Each tool turns into a short editor script and sends it over the bridge.
++
++Every change goes through the editor's undo history, so anything the assistant does can be undone with Ctrl+Z or the `pyrite_undo` tool.
++
++## Setup
++
++1. Build the editor (the bridge is part of it). The log shows `MCP bridge listening on 127.0.0.1:6464` once it is running.
++2. Install the Python package (Python 3.10 or newer):
++
++   ```
++   pip install -r tools/mcp/requirements.txt
++   ```
++
++3. Add the server to your MCP client. For Claude Desktop, edit `claude_desktop_config.json`:
++
++   ```json
++   {
++     "mcpServers": {
++       "pyrite64": {
++         "command": "python",
++         "args": ["E:\\path\\to\\pyrite64\\tools\\mcp\\pyrite_mcp.py"]
++       }
++     }
++   }
++   ```
++
++   Use the full path to the `python.exe` that has `mcp` installed if `python` on your PATH is a different one.
++
++4. Restart the client, open a project in the editor, and ask it something like "what's in the open scene?".
++
++## Settings
++
++| Env var | Where | Meaning |
++|---|---|---|
++| `PYRITE_MCP_PORT` | editor and MCP server | Bridge port, default `6464`. Set to `0` in the editor's environment to turn the bridge off. Both sides must use the same port. |
++
++Only one editor can own the port. A second editor instance logs a warning and runs without the bridge.
++
++## Tools
++
++| Tool | What it does |
++|---|---|
++| `pyrite_status` | Open scene, scene list, selection, whether a build is running |
++| `pyrite_scene_tree` | Object hierarchy with transforms and components |
++| `pyrite_find_objects` | Find objects by name |
++| `pyrite_get_object` | Full object JSON including component settings |
++| `pyrite_list_assets` / `pyrite_list_components` | What can be placed or added |
++| `pyrite_add_object` / `pyrite_add_model` / `pyrite_add_prefab` | Create objects |
++| `pyrite_set_transform` / `pyrite_reparent` / `pyrite_delete_objects` | Edit objects |
++| `pyrite_add_component` / `pyrite_select` | Components, editor selection |
++| `pyrite_load_scene` / `pyrite_save` / `pyrite_build` / `pyrite_get_log` / `pyrite_undo` | Project actions |
++| `pyrite_run_js` | Run any editor script, for batch or procedural work the other tools don't cover |
++
++The JavaScript API available to `pyrite_run_js` and to editor scripts is listed at the top of `pyrite_mcp.py` (`JS_API`). The scene, asset and component functions come from `src/editor/script/impl/sceneApi.cpp`.
++
++## Limits
++
++* Scripts run on the editor's main thread. A script with an endless loop freezes the editor.
++* Requests time out after 30 seconds if the editor is busy (for example a modal dialog is open).
++* Component settings can be read with `pyrite_get_object`, but there is no setter per component field yet. To change them, read the object JSON, edit it, and recreate the object with `scene.addJSON`.
+diff --git a/tools/mcp/pyrite_mcp.py b/tools/mcp/pyrite_mcp.py
+new file mode 100644
+index 0000000..d4efe24
+--- /dev/null
++++ b/tools/mcp/pyrite_mcp.py
+@@ -0,0 +1,445 @@
++"""
++Pyrite64 MCP server.
++
++Lets an MCP client (Claude Desktop, Claude Code, ...) inspect and edit the scene that is
++open in a running Pyrite64 editor. It talks to the editor's built-in bridge
++(src/editor/mcpBridge.cpp) on 127.0.0.1, which runs editor scripts (JavaScript) on the
++editor's main thread.
++
++Run:   python pyrite_mcp.py          (stdio transport, what Claude Desktop expects)
++Env:   PYRITE_MCP_PORT  bridge port, default 6464 (must match the editor)
++"""
++
++from __future__ import annotations
++
++import json
++import math
++import os
++import socket
++import threading
++import time
++from typing import Any
++
++try:  # mcp >= 2
++    from mcp.server.mcpserver import MCPServer as _Server
++    from mcp.server.mcpserver.exceptions import ToolError
++except ImportError:  # mcp 1.x
++    from mcp.server.fastmcp import FastMCP as _Server
++    from mcp.server.fastmcp.exceptions import ToolError
++
++HOST = "127.0.0.1"
++PORT = int(os.environ.get("PYRITE_MCP_PORT", "6464"))
++
++JS_API = """
++Editor script globals (JavaScript, QuickJS):
++  scene.list() -> [{id,name}]            scene.current() -> {id,name,objectCount} | null
++  scene.load(id)                          scene.objects(rootUUID?, maxDepth?) -> tree summary
++  scene.find(text) -> [SceneObject]       scene.get(uuid) -> SceneObject | null
++  scene.create(name, parentUUID?)         scene.addModel(assetUUID) / scene.addPrefab(assetUUID)
++  scene.addJSON(objJson, parentUUID?)     scene.serialize(uuid) -> full object JSON incl. components
++  scene.remove(uuid)                      scene.move(uuid, targetUUID (0 = root), asChild = true)
++  scene.select([uuids])                   scene.setEnabled(uuid, bool)
++  scene.addComponent(uuid, idOrName) -> componentUUID   scene.removeComponent(uuid, componentUUID)
++  assets.list(type?) type: image|audio|font|model|code_object|code_global|prefab|node_graph|music|editor_script
++  assets.get(assetUUID) -> {uuid,name,path,type,animations?}
++  components.list() -> [{id,name}]
++  editor.save() editor.build(run?) editor.isBuilding() editor.reloadAssets() editor.getSelObjects()
++  history.markChanged(desc) history.undo() history.redo()
++  console.log(text) console.read(maxChars?)
++SceneObject: .uuid .name .pos {x,y,z} .rot quaternion {x,y,z,w} .scale {x,y,z} (assignable)
++Asset UUIDs are strings (64-bit). Object UUIDs are numbers.
++Each call runs in its own block scope; use globalThis.name = ... to keep helpers between calls.
++After changing the scene call history.markChanged("what changed") so it can be undone.
++The value of the last expression is returned (objects as JSON).
++""".strip()
++
++mcp = _Server(
++    "pyrite64",
++    instructions=(
++        "Tools for the Pyrite64 N64 game editor. The editor must be running with a project open. "
++        "Prefer the specific tools; use pyrite_run_js for anything they don't cover.\n\n" + JS_API
++    ),
++)
++
++
++# ---------------------------------------------------------------- bridge connection
++
++class BridgeError(ToolError):
++    """Shown to the model as-is (script errors, editor not running)."""
++
++
++class Bridge:
++    def __init__(self, host: str, port: int):
++        self.host, self.port = host, port
++        self.sock: socket.socket | None = None
++        self.buf = b""
++        self.next_id = 1
++        self.lock = threading.Lock()
++
++    def _connect(self) -> None:
++        try:
++            self.sock = socket.create_connection((self.host, self.port), timeout=5)
++        except OSError as e:
++            self.sock = None
++            raise BridgeError(
++                f"Can't reach the Pyrite64 editor on {self.host}:{self.port}. "
++                "Is the editor running (a build with the MCP bridge)?"
++            ) from e
++        self.sock.settimeout(60)
++        self.buf = b""
++
++    def _roundtrip(self, payload: dict) -> dict:
++        if self.sock is None:
++            self._connect()
++        assert self.sock is not None
++        self.sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
++        while b"\n" not in self.buf:
++            chunk = self.sock.recv(65536)
++            if not chunk:
++                raise ConnectionError("editor closed the connection")
++            self.buf += chunk
++        line, self.buf = self.buf.split(b"\n", 1)
++        return json.loads(line.decode("utf-8"))
++
++    def request(self, payload: dict) -> dict:
++        with self.lock:
++            payload = dict(payload, id=self.next_id)
++            self.next_id += 1
++            try:
++                return self._roundtrip(payload)
++            except (OSError, ConnectionError):
++                # editor restarted or connection dropped, retry once on a fresh socket
++                self.close()
++                try:
++                    return self._roundtrip(payload)
++                except (OSError, ConnectionError) as e:
++                    self.close()
++                    raise BridgeError(f"Lost connection to the editor: {e}") from e
++
++    def close(self) -> None:
++        if self.sock is not None:
++            try:
++                self.sock.close()
++            except OSError:
++                pass
++        self.sock = None
++
++
++bridge = Bridge(HOST, PORT)
++
++
++def js(code: str) -> Any:
++    """Runs JS in the editor. Returns parsed JSON when possible, raises on script errors.
++    The code is wrapped in a block so const/let names don't leak into the editor's global
++    scope between calls (the block still yields the last expression's value)."""
++    res = bridge.request({"code": "{\n" + code + "\n}"})
++    text = res.get("result", "")
++    if not res.get("ok"):
++        raise BridgeError(text or "script failed")
++    try:
++        return json.loads(text)
++    except (TypeError, ValueError):
++        return text
++
++
++def q(value: Any) -> str:
++    """Encodes a Python value as a JS literal."""
++    return json.dumps(value)
++
++
++def euler_to_quat(deg: list[float]) -> dict:
++    """XYZ euler angles in degrees -> quaternion {x,y,z,w} (rotation applied X, then Y, then Z)."""
++    rx, ry, rz = (math.radians(a) / 2 for a in deg)
++    cx, sx = math.cos(rx), math.sin(rx)
++    cy, sy = math.cos(ry), math.sin(ry)
++    cz, sz = math.cos(rz), math.sin(rz)
++    return {
++        "x": sx * cy * cz - cx * sy * sz,
++        "y": cx * sy * cz + sx * cy * sz,
++        "z": cx * cy * sz - sx * sy * cz,
++        "w": cx * cy * cz + sx * sy * sz,
++    }
++
++
++def vec(v: list[float] | None) -> dict | None:
++    if v is None:
++        return None
++    if len(v) != 3:
++        raise BridgeError("expected [x, y, z]")
++    return {"x": v[0], "y": v[1], "z": v[2]}
++
++
++def transform_js(var: str, pos, rot_euler_deg, rot_quat, scale) -> str:
++    parts = []
++    if pos is not None:
++        parts.append(f"{var}.pos = {q(vec(pos))};")
++    if rot_quat is not None:
++        if len(rot_quat) != 4:
++            raise BridgeError("rot_quat must be [x, y, z, w]")
++        parts.append(f"{var}.rot = {q(dict(zip('xyzw', rot_quat)))};")
++    elif rot_euler_deg is not None:
++        if len(rot_euler_deg) != 3:
++            raise BridgeError("rot_euler_deg must be [x, y, z]")
++        parts.append(f"{var}.rot = {q(euler_to_quat(rot_euler_deg))};")
++    if scale is not None:
++        if isinstance(scale, (int, float)):
++            scale = [scale, scale, scale]
++        parts.append(f"{var}.scale = {q(vec(scale))};")
++    return "\n".join(parts)
++
++
++# JS helper: resolves an asset by uuid, exact name, file name, or project path
++FIND_ASSET = """
++function __findAsset(key, type) {
++  const list = assets.list(type);
++  const k = String(key).toLowerCase();
++  const hit = list.find(a => a.uuid === String(key))
++    || list.find(a => a.name.toLowerCase() === k || a.path.toLowerCase() === k)
++    || list.find(a => a.name.toLowerCase().replace(/\\.[^.]+$/, '') === k);
++  if (!hit) throw new Error(type + " asset not found: " + key);
++  return hit;
++}
++"""
++
++
++def obj_result(var: str = "o") -> str:
++    return f"({{uuid: {var}.uuid, name: {var}.name, pos: {var}.pos, rot: {var}.rot, scale: {var}.scale}})"
++
++
++# ---------------------------------------------------------------- tools
++
++@mcp.tool()
++def pyrite_status() -> dict:
++    """Checks the editor connection and returns the open scene and basic project info."""
++    return js("({scene: scene.current(), scenes: scene.list(), building: editor.isBuilding(),"
++              " selected: editor.getSelObjects().map(o => o.uuid)})")
++
++
++def pyrite_run_js(code: str) -> Any:
++    return js(code)
++
++
++pyrite_run_js.__doc__ = (
++    "Runs arbitrary editor-script JavaScript in the open editor and returns the value of the "
++    "last expression. Use for anything the other tools don't cover (batch edits, procedural "
++    "layout, editing component settings). Call history.markChanged(\"...\") after scene changes "
++    "so they can be undone.\n\n" + JS_API
++)
++pyrite_run_js = mcp.tool()(pyrite_run_js)
++
++
++@mcp.tool()
++def pyrite_load_scene(scene_id: int) -> Any:
++    """Opens a scene by id (see pyrite_status for the list). Unsaved changes in the current scene
++    may be lost, so call pyrite_save first if needed."""
++    return js(f"scene.load({int(scene_id)}); scene.current()")
++
++
++@mcp.tool()
++def pyrite_scene_tree(root_uuid: int | None = None, max_depth: int = 3) -> Any:
++    """Returns the object hierarchy of the open scene (uuid, name, transform, components, children).
++    Use root_uuid to look at one branch; deeper levels are summarised as childCount."""
++    return js(f"scene.objects({q(root_uuid)}, {int(max_depth)})")
++
++
++@mcp.tool()
++def pyrite_find_objects(name_contains: str) -> Any:
++    """Finds objects whose name contains the text (case-insensitive)."""
++    return js(f"scene.find({q(name_contains)}).map(o => ({{uuid: o.uuid, name: o.name, pos: o.pos}}))")
++
++
++@mcp.tool()
++def pyrite_get_object(uuid: int) -> Any:
++    """Returns the full serialized JSON of one object, including all component settings.
++    The same format can be passed to pyrite_run_js via scene.addJSON(json, parentUUID)."""
++    return js(f"scene.serialize({int(uuid)})")
++
++
++@mcp.tool()
++def pyrite_list_assets(asset_type: str | None = None, name_contains: str | None = None) -> Any:
++    """Lists project assets. asset_type: image, audio, font, model, code_object, code_global,
++    prefab, node_graph, music, editor_script. Asset UUIDs are strings."""
++    code = f"assets.list({q(asset_type)})"
++    if name_contains:
++        code += f".filter(a => (a.name + ' ' + a.path).toLowerCase().includes({q(name_contains.lower())}))"
++    return js(code)
++
++
++@mcp.tool()
++def pyrite_list_components() -> Any:
++    """Lists the component types that can be added to objects."""
++    return js("components.list()")
++
++
++@mcp.tool()
++def pyrite_add_object(
++    name: str,
++    parent_uuid: int | None = None,
++    pos: list[float] | None = None,
++    rot_euler_deg: list[float] | None = None,
++    scale: list[float] | float | None = None,
++    components: list[str] | None = None,
++) -> Any:
++    """Creates an empty object (optionally under a parent, with components like "Light", "Camera",
++    "Collider", "Code"). Good for grouping objects or as an empty transform."""
++    code = f"const o = scene.create({q(name)}, {q(parent_uuid)});\n"
++    code += transform_js("o", pos, rot_euler_deg, None, scale) + "\n"
++    for comp in components or []:
++        code += f"scene.addComponent(o.uuid, {q(comp)});\n"
++    code += f"history.markChanged({q('Add ' + name)});\n" + obj_result()
++    return js(code)
++
++
++def _place(kind: str, asset: str, name, parent_uuid, pos, rot_euler_deg, scale) -> Any:
++    asset_type = "model" if kind == "addModel" else "prefab"
++    code = FIND_ASSET + f"const a = __findAsset({q(asset)}, {q(asset_type)});\n"
++    code += f"const o = scene.{kind}(a.uuid);\n"
++    if name:
++        code += f"o.name = {q(name)};\n"
++    if parent_uuid:
++        code += f"scene.move(o.uuid, {int(parent_uuid)}, true);\n"
++    code += transform_js("o", pos, rot_euler_deg, None, scale) + "\n"
++    code += f"history.markChanged('Add ' + o.name);\n" + obj_result()
++    return js(code)
++
++
++@mcp.tool()
++def pyrite_add_model(
++    asset: str,
++    name: str | None = None,
++    parent_uuid: int | None = None,
++    pos: list[float] | None = None,
++    rot_euler_deg: list[float] | None = None,
++    scale: list[float] | float | None = None,
++) -> Any:
++    """Places a 3D model asset in the scene (same as dragging it in). asset can be the asset UUID,
++    file name (with or without extension) or project path. Animated models get the animated
++    model component automatically."""
++    return _place("addModel", asset, name, parent_uuid, pos, rot_euler_deg, scale)
++
++
++@mcp.tool()
++def pyrite_add_prefab(
++    asset: str,
++    name: str | None = None,
++    parent_uuid: int | None = None,
++    pos: list[float] | None = None,
++    rot_euler_deg: list[float] | None = None,
++    scale: list[float] | float | None = None,
++) -> Any:
++    """Places an instance of a prefab asset (by UUID, name or path)."""
++    return _place("addPrefab", asset, name, parent_uuid, pos, rot_euler_deg, scale)
++
++
++@mcp.tool()
++def pyrite_set_transform(
++    uuid: int,
++    pos: list[float] | None = None,
++    rot_euler_deg: list[float] | None = None,
++    rot_quat: list[float] | None = None,
++    scale: list[float] | float | None = None,
++    name: str | None = None,
++) -> Any:
++    """Sets position, rotation (euler degrees XYZ, or quaternion [x,y,z,w]), scale and/or name
++    of an object. Omitted values stay unchanged."""
++    code = f"const o = scene.get({int(uuid)}); if (!o) throw new Error('object not found');\n"
++    if name is not None:
++        code += f"o.name = {q(name)};\n"
++    code += transform_js("o", pos, rot_euler_deg, rot_quat, scale) + "\n"
++    code += "history.markChanged('Transform ' + o.name);\n" + obj_result()
++    return js(code)
++
++
++@mcp.tool()
++def pyrite_reparent(uuid: int, parent_uuid: int = 0) -> Any:
++    """Moves an object under another object (parent_uuid 0 = scene root)."""
++    return js(f"const ok = scene.move({int(uuid)}, {int(parent_uuid)}, true);"
++              f" if (ok) history.markChanged('Move Object'); ok")
++
++
++@mcp.tool()
++def pyrite_delete_objects(uuids: list[int]) -> Any:
++    """Deletes objects (and their children). Undoable with pyrite_undo."""
++    code = f"const r = {q(uuids)}.map(u => scene.remove(u));\n"
++    code += "history.markChanged('Delete Object');\nr"
++    return js(code)
++
++
++@mcp.tool()
++def pyrite_add_component(uuid: int, component: str) -> Any:
++    """Adds a component to an object by name ("Light", "Model (Static)", "Collider", ...) or id.
++    Returns the new component's UUID. Configure it afterwards via pyrite_get_object and
++    pyrite_run_js if needed."""
++    return js(f"const c = scene.addComponent({int(uuid)}, {q(component)});"
++              f" history.markChanged('Add Component'); ({{componentUUID: c}})")
++
++
++@mcp.tool()
++def pyrite_select(uuids: list[int]) -> Any:
++    """Selects objects in the editor so the user can see what you're referring to."""
++    return js(f"scene.select({q(uuids)})")
++
++
++@mcp.tool()
++def pyrite_undo(steps: int = 1) -> Any:
++    """Undoes the last change(s) in the editor."""
++    return js(f"let n = 0; for (let i = 0; i < {int(steps)}; ++i) if (history.undo()) ++n; n")
++
++
++@mcp.tool()
++def pyrite_save() -> Any:
++    """Saves the project and the open scene to disk."""
++    js("editor.save()")
++    return "saved"
++
++
++@mcp.tool()
++def pyrite_get_log(max_chars: int = 4000) -> Any:
++    """Returns the end of the editor log (build output, script errors, warnings)."""
++    return js(f"console.read({int(max_chars)})")
++
++
++BUILD_MARKER = "[mcp] build requested"
++
++
++def _log_since_marker(max_chars: int = 6000) -> str:
++    log = js("console.read(200000)")
++    log = log if isinstance(log, str) else json.dumps(log)
++    idx = log.rfind(BUILD_MARKER)
++    if idx >= 0:
++        log = log[idx + len(BUILD_MARKER):]
++    return log[-max_chars:].strip()
++
++
++@mcp.tool()
++def pyrite_build(run: bool = False, timeout_s: int = 600) -> Any:
++    """Saves, builds the ROM and waits for it to finish, then returns the build output.
++    run=True also launches it in the configured emulator (returns once the log goes quiet,
++    since the editor counts a running emulator as still busy)."""
++    js("editor.save()")
++    started = js(f"console.log({q(BUILD_MARKER)}); editor.build({q(run)})")
++    if started is False:
++        return {"started": False, "log": _log_since_marker()}
++
++    deadline = time.time() + timeout_s
++    last_len, quiet_since = -1, time.time()
++    time.sleep(0.5)
++    while time.time() < deadline:
++        if not js("editor.isBuilding()"):
++            return {"finished": True, "log": _log_since_marker()}
++        if run:
++            cur_len = len(js("console.read(200000)"))
++            if cur_len != last_len:
++                last_len, quiet_since = cur_len, time.time()
++            elif time.time() - quiet_since > 8:
++                return {"finished": True, "running": True, "log": _log_since_marker()}
++        time.sleep(1.0)
++    return {"finished": False, "log": _log_since_marker()}
++
++
++def main() -> None:
++    mcp.run()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/mcp/requirements.txt b/tools/mcp/requirements.txt
+new file mode 100644
+index 0000000..d511adc
+--- /dev/null
++++ b/tools/mcp/requirements.txt
+@@ -0,0 +1 @@
++mcp>=1.2
+-- 
+2.43.0
+
