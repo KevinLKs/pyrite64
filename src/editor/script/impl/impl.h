@@ -37,6 +37,14 @@ namespace Editor::ScriptHost::Impl
   // In JS: editor.getSelectedObjects()
   JSValue getSelectedObjects(JSContext *c, JSValueConst thisVal, int argc, JSValueConst *argv);
 
+  // Creates a SceneObject handle for a scene object UUID
+  JSValue wrapObject(JSContext *c, uint32_t uuid);
+
+  //########// Scene / Asset API (sceneApi.cpp) //########//
+
+  // Adds scene.*, assets.*, components.*, console.read and editor.isBuilding
+  void initSceneApi(JSContext *c);
+
   //########// Math Types //########//
 
   struct Vec3

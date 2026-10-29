@@ -135,6 +135,8 @@ namespace Editor::ScriptHost
 
     JS_FreeValue(js.ctx, global);
 
+    Impl::initSceneApi(js.ctx);
+
     Utils::Logger::log("Editor scripts: context started");
 
     for(auto &entry : project.getAssets().getTypeEntries(Project::FileType::EDITOR_SCRIPT)) {

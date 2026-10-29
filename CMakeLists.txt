@@ -300,6 +300,9 @@ add_executable(pyrite64 src/main.cpp
         src/editor/script/impl/object.cpp
         src/editor/script/impl/vec.cpp
         src/editor/script/impl/quat.cpp
+        src/editor/script/impl/sceneApi.cpp
+        src/editor/mcpBridge.h
+        src/editor/mcpBridge.cpp
         src/editor/actionSearch.h
         src/editor/actionSearch.cpp
         src/project/graph/valueTypes.h
@@ -413,6 +416,11 @@ target_link_libraries(pyrite64 PRIVATE
     glm::glm
     qjs
 )
+
+# sockets for the MCP bridge (src/editor/mcpBridge.cpp)
+if(WIN32)
+    target_link_libraries(pyrite64 PRIVATE ws2_32)
+endif()
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_definitions(pyrite64 PRIVATE "HAS_SHADER_CROSS=1")

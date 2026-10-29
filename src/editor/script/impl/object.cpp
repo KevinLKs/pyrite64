@@ -136,3 +136,8 @@ JSValue Editor::ScriptHost::Impl::getSelectedObjects(JSContext *c, JSValueConst,
   }
   return arr;
 }
+
+JSValue Editor::ScriptHost::Impl::wrapObject(JSContext *c, uint32_t uuid)
+{
+  return newObjectHandle(c, uuid);
+}

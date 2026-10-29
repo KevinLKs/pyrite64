@@ -17,6 +17,7 @@
 #include "build/projectBuilder.h"
 #include "editor/actions.h"
 #include "editor/actionSearch.h"
+#include "editor/mcpBridge.h"
 #include "editor/script/scriptHost.h"
 #include "editor/window.h"
 #include "editor/imgui/theme.h"
@@ -297,6 +298,8 @@ int main(int argc, char** argv)
     }
 
     // Main loop
+    Editor::McpBridge::start();
+
     bool done = false;
     float lastPinch = 1.0f;
     while(!done) {
@@ -397,6 +400,14 @@ int main(int argc, char** argv)
       updateWindowTitle();
 
       if(SDL_GetWindowFlags(ctx.window) & SDL_WINDOW_MINIMIZED) {
+        // keep serving bridge requests while minimized
+        if (ctx.project) {
+          Editor::UndoRedo::getHistory().begin();
+          Editor::McpBridge::poll();
+          Editor::UndoRedo::getHistory().end();
+        } else {
+          Editor::McpBridge::poll();
+        }
         SDL_Delay(10);
         continue;
       }
@@ -442,11 +453,13 @@ int main(int argc, char** argv)
 
       if (ctx.project) {
         Editor::UndoRedo::getHistory().begin();
+        Editor::McpBridge::poll(); // inside begin/end so script edits are undoable
         ctx.editorScene->draw();
         Editor::UndoRedo::getHistory().end();
         // asks before scene/prefab files are upgraded, see Project::Migration
         Editor::MigrationOverlay::draw();
       } else {
+        Editor::McpBridge::poll(); // answers "no project open"
         editorMain.draw();
       }
 
@@ -503,6 +516,7 @@ int main(int argc, char** argv)
   updateCheckThread.join();
   SDL_WaitForGPUIdle(ctx.gpu);
 
+  Editor::McpBridge::stop();
   ImGui_ImplSDL3_Shutdown();
   ImGui_ImplSDLGPU3_Shutdown();
   ImGui::DestroyContext();
