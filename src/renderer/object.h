@@ -20,7 +20,7 @@ namespace Renderer
 
       glm::vec3 pos{0,0,0};
       float scale{1.0f};
-      bool transformDirty{true};
+      bool transformDirty{false};
 
     public:
       UniformsObject uniform{};

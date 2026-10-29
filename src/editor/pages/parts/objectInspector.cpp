@@ -249,7 +249,7 @@ namespace
       borderRect.Max.x -= 2.0f;
       borderRect.Max.y -= 2.0f;
       // Draw an outline to highlight the object inspector panel
-      ImGui::GetWindowDrawList()->AddRect(borderRect.Min, borderRect.Max, col, 0.0f, 0, 2.0f);
+      ImGui::GetWindowDrawList()->AddRect(borderRect.Min, borderRect.Max, col, 0.0f, 2.0f);
     }
 
     bool accepted = false;

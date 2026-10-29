@@ -3,6 +3,7 @@
 * @license MIT
 */
 #include "../components.h"
+#include "../../../editor/pages/parts/assets/textureEditor.h"
 #include "../../../context.h"
 #include "../../../editor/imgui/helper.h"
 #include "../../../editor/imgui/notification.h"
@@ -183,12 +184,26 @@ namespace Project::Component::Code
         }
 
         const bool isInstanceMode = ImTable::isPrefabLocked(&obj);
+        const std::string *currGroup = nullptr;
+        bool groupOpen = true;
         for (auto &field : script->params.fields)
         {
           std::string name{};
           auto metaName = field.attr.find("P64::Name");
           if (metaName == field.attr.end())continue;
           name = metaName->second;
+
+          if (!currGroup || *currGroup != field.group) {
+            currGroup = &field.group;
+            groupOpen = true;
+            if (!field.group.empty()) {
+              ImGui::TableNextRow();
+              ImGui::TableSetColumnIndex(0);
+              groupOpen = ImGui::TreeNodeEx(field.group.c_str(),
+                ImGuiTreeNodeFlags_SpanAllColumns | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_FramePadding);
+            }
+          }
+          if (!groupOpen)continue;
 
           if(data.args.find(field.name) == data.args.end()) {
             data.args[field.name] = PropString{field.name, field.defaultValue};
@@ -230,8 +245,9 @@ namespace Project::Component::Code
               };
             
             if(field.type == Utils::DataType::ASSET_SPRITE) {
-              const auto &assets = ctx.project->getAssets().getTypeEntries(FileType::IMAGE);
-              ImTable::addAssetVecComboBox("", assets, uuid, validationFunc);
+              if(Editor::TextureEditor::drawTexturePicker(name.c_str(), uuid, "")) {
+                validationFunc(uuid);
+              }
             } else if(field.type == Utils::DataType::OBJECT_REF) {
               // @TODO: do this in scene itself
               auto &map = ctx.project->getScenes().getLoadedScene()->objectsMap;

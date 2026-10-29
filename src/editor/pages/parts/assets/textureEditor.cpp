@@ -96,9 +96,14 @@ bool Editor::TextureEditor::drawTexturePicker(const char *label, uint64_t &texUU
   // Field: looks like a combo box, opens the picker
   std::string popupId = std::string{"##TexPicker"} + label;
   std::string preview = current ? current->name : std::string{"<None>"};
+  
   float arrowW = ImGui::GetFrameHeight();
-  float fieldW = ImGui::CalcItemWidth();
-  if(ImGui::Button((fitText(preview, fieldW - arrowW - 12.0f) + "##" + label).c_str(), ImVec2(fieldW - arrowW, 0))) {
+  float fieldW = ImGui::CalcItemWidth() - arrowW;
+
+  float widthBtn = arrowW + 1_px;
+  if(texUUID != 0)fieldW -= widthBtn;
+
+  if(ImGui::Button((fitText(preview, fieldW - 12.0f) + "##" + label).c_str(), ImVec2(fieldW, 0))) {
     state.dir = homeDir;
     state.search.clear();
     ImGui::OpenPopup(popupId.c_str());
@@ -111,6 +116,17 @@ bool Editor::TextureEditor::drawTexturePicker(const char *label, uint64_t &texUU
     return std::any_of(images.begin(), images.end(), [uuid](const auto &img) { return img.getUUID() == uuid; });
   })) {
     changed = true;
+  }
+
+  if(texUUID != 0) {
+    ImGui::SameLine(0, 0);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {0, ImGui::GetStyle().FramePadding.y});
+    if(ImGui::Button((std::string{ICON_MDI_WINDOW_CLOSE "##clear"} + label).c_str(), ImVec2(widthBtn, 0))) 
+    {
+      texUUID = 0;
+      changed = true;
+    }
+    ImGui::PopStyleVar();
   }
 
   ImGui::SameLine(0, 0);

@@ -264,7 +264,11 @@ void ImGui::Theme::update()
   ImGuizmo::SetGizmoSizeClipSpace(0.14f);
 
   loadFonts(zoomFactor);
-  GetStyle().ScaleAllSizes(zoomFactor);
+  style.ScaleAllSizes(zoomFactor);
+
+  // avoids some internal "thickness" truncation to 0
+  style.InputTextCursorSize = std::max(1.0f, style.InputTextCursorSize);
+  style._MainScale = std::max(1.0f, style._MainScale);
 }
 
 ImFont* ImGui::Theme::getFontMono() {

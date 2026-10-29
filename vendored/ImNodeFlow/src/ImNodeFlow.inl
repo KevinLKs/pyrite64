@@ -155,7 +155,7 @@ namespace ImFlow
     inline void draw_link_solid(const std::vector<ImVec2>& pts, ImU32 color, float thickness)
     {
         if (pts.size() < 2) return;
-        ImGui::GetWindowDrawList()->AddPolyline(pts.data(), (int)pts.size(), color, 0, thickness);
+        ImGui::GetWindowDrawList()->AddPolyline(pts.data(), (int)pts.size(), color, thickness);
     }
 
     inline void draw_link_gradient(const std::vector<ImVec2>& pts, ImU32 c1, ImU32 c2, float thickness)
@@ -480,7 +480,7 @@ namespace ImFlow
             draw_list->AddRectFilled(m_pos - m_style->extra.padding, m_pos + m_size + m_style->extra.padding, m_style->extra.bg_hover_color, m_style->extra.bg_radius);
         else
             draw_list->AddRectFilled(m_pos - m_style->extra.padding, m_pos + m_size + m_style->extra.padding, m_style->extra.bg_color, m_style->extra.bg_radius);
-        draw_list->AddRect(m_pos - m_style->extra.padding, m_pos + m_size + m_style->extra.padding, m_style->extra.border_color, m_style->extra.bg_radius, 0, m_style->extra.border_thickness);
+        draw_list->AddRect(m_pos - m_style->extra.padding, m_pos + m_size + m_style->extra.padding, m_style->extra.border_color, m_style->extra.bg_radius, m_style->extra.border_thickness);
     }
 
     inline void Pin::update()

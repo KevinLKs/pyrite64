@@ -91,7 +91,7 @@ namespace
     // Optional border
     if (style.FrameBorderSize > 0.0f) {
         ImU32 border_col = ImGui::GetColorU32(ImGuiCol_Border);
-        draw_list->AddRect(a, b, border_col, rounding, (int)round_flags, style.FrameBorderSize);
+        draw_list->AddRect(a, b, border_col, rounding, style.FrameBorderSize, round_flags);
     }
 
     // Draw the label text centered inside the rect
@@ -1270,7 +1270,7 @@ void Editor::Viewport3D::draw()
     ImU32 fillCol = ImGui::GetColorU32(ImGuiCol_DragDropTarget, 0.15f);
     ImU32 borderCol = ImGui::GetColorU32(ImGuiCol_DragDropTarget, 0.85f);
     drawList->AddRectFilled(rectStartScreen, rectEndScreen, fillCol);
-    drawList->AddRect(rectStartScreen, rectEndScreen, borderCol, 0.0f, 0, 1.5f);
+    drawList->AddRect(rectStartScreen, rectEndScreen, borderCol, 0.0f, 1.5f);
   }
 
   ImDrawList* draw_list = ImGui::GetWindowDrawList();

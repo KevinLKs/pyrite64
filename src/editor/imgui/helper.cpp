@@ -115,7 +115,7 @@ bool ImTable::bitMaskComboImpl(
         : ICON_MDI_CHECKBOX_BLANK_OUTLINE " "
       } + name + "##" + std::to_string(bit);
 
-      if (ImGui::Selectable(valText.c_str(), selected, ImGuiSelectableFlags_DontClosePopups)) {
+      if (ImGui::Selectable(valText.c_str(), selected, ImGuiSelectableFlags_NoAutoClosePopups)) {
         if (selected) valueMask &= ~(1u << bit);
         else          valueMask |=  (1u << bit);
         changed = true;

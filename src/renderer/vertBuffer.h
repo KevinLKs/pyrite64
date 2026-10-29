@@ -17,16 +17,21 @@ namespace Renderer
       SDL_GPUDevice* gpuDevice{nullptr};
 
       SDL_GPUBuffer* buffer{nullptr};
-      SDL_GPUTransferBuffer* bufferTrans{nullptr};
-
       SDL_GPUBuffer* bufferIdx{nullptr};
+      SDL_GPUBuffer* nextBuffer{nullptr};
+      SDL_GPUBuffer* nextBufferIdx{nullptr};
+
+      SDL_GPUTransferBuffer* bufferTrans{nullptr};
       SDL_GPUTransferBuffer* bufferIdxTrans{nullptr};
 
+      size_t capacityVert{0};
+      size_t capacityIdx{0};
       size_t currVertByteSize{0};
       size_t currIdxByteSize{0};
+      uint32_t drawIdxCount{0}; // index count for the GPU
       bool needsUpload{false};
 
-      void resize(uint32_t sizeVert, uint32_t sizeIndex);
+      void grow(size_t sizeVert, size_t sizeIndex);
 
       void setData(char* verts, uint32_t vertsSize,
         const std::vector<uint16_t> &indices
@@ -69,7 +74,7 @@ namespace Renderer
       }
 
       uint32_t getIndexCount() const {
-        return static_cast<uint32_t>(currIdxByteSize / sizeof(uint16_t));
+        return drawIdxCount;
       }
   };
 }

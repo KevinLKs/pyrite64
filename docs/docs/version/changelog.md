@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.10.0
+
+### Editor
+* VSCode project generator (on new project + manual) by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/329
+* Add template-selection during project creation by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/330
+* Fix: Correct lock-Icon size when zoomed by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/331
+* Support editor side bool and color picker arguments in code components, add Range & Min/Max attributes by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/336
+* fix excessive history with input/color picker by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/338
+* Preview Fog in the editor + setting to not do so by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/341
+* Texture Picker (preview and search textures) by @KevinLKs in https://github.com/HailToDodongo/pyrite64/pull/342
+* Add P64::Group attribute to group arguments by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/348
+* fix: broken asset table when toggling exclude setting by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/333
+* Allow Meshes with no material for collision by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/334
+
+### Features & Engine changes
+* Fix skinned meshes using bigtex by @FlorentDeloison in https://github.com/HailToDodongo/pyrite64/pull/328
+* draw 3D/particle layers per camera instead of once per frame by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/335
+* Treat collision as double sided for character-body, capsule & sphere sweeps by @Byterset in https://github.com/HailToDodongo/pyrite64/pull/337
+* Added world space offset to Camera component by @thekovic in https://github.com/HailToDodongo/pyrite64/pull/340
+* Stable Layer names / access via hash by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/347
+* Shared C++ Script data & methods by @HailToDodongo in https://github.com/HailToDodongo/pyrite64/pull/346
+  * https://hailtododongo.github.io/pyrite64/docs/manual/script/objScript.html#shared-data
+
 ## v0.9.0
 
 ### Materials & Rendering

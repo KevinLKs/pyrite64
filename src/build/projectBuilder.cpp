@@ -137,6 +137,7 @@ bool Build::buildProject(const std::string &configPath)
       if (entry.conf.exclude || entry.type == Project::FileType::UNKNOWN
         || entry.type == Project::FileType::CODE_OBJ
         || entry.type == Project::FileType::CODE_GLOBAL
+        || entry.type == Project::FileType::EDITOR_SCRIPT
       ) continue;
       sceneCtx.addAsset(entry);
     }

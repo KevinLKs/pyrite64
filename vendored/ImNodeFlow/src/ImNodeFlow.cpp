@@ -284,7 +284,7 @@ namespace ImFlow {
             pbr.y -= thickness / 2;
             thickness *= -1.f;
         }
-        draw_list->AddRect(offset + m_pos - ptl, offset + m_pos + m_size + pbr, col, m_style->radius, 0, thickness);
+        draw_list->AddRect(offset + m_pos - ptl, offset + m_pos + m_size + pbr, col, m_style->radius, thickness);
 
 
         if (ImGui::IsWindowHovered() && !ImGui::IsKeyDown(ImGuiKey_LeftCtrl) &&
@@ -383,7 +383,7 @@ namespace ImFlow {
             bool sel = (g.get() == m_selectedGroup) || (g.get() == m_hoveredGroup);
             ImU32 outline = sel ? IM_COL32(0xFF, 0x99, 0x55, 0xFF) : IM_COL32(0xAA, 0xAA, 0xAA, 0xC0);
 
-            dl->AddRect(tl, br, outline, 4.0f, 0, sel ? 2.0f : 1.5f);
+            dl->AddRect(tl, br, outline, 4.0f, sel ? 2.0f : 1.5f);
 
             // Header strip (faint) so the title reads against the grid.
             ImVec2 hbr = grid2screen(g->m_pos + ImVec2(g->m_size.x, GRP_HEADER_H));
@@ -558,7 +558,7 @@ namespace ImFlow {
                 ImVec2 rmin(fminf(m_boxSelectStart.x, cur.x), fminf(m_boxSelectStart.y, cur.y));
                 ImVec2 rmax(fmaxf(m_boxSelectStart.x, cur.x), fmaxf(m_boxSelectStart.y, cur.y));
                 draw_list->AddRectFilled(rmin, rmax, ImGui::GetColorU32(ImGuiCol_DragDropTarget, 0.15f));
-                draw_list->AddRect(rmin, rmax, ImGui::GetColorU32(ImGuiCol_DragDropTarget, 0.85f), 0.f, 0, 1.5f);
+                draw_list->AddRect(rmin, rmax, ImGui::GetColorU32(ImGuiCol_DragDropTarget, 0.85f), 0.f, 1.5f);
                 for (auto &n: m_nodes) {
                     ImVec2 p = grid2screen(n.second->getPos());
                     ImVec2 q(p.x + n.second->getSize().x, p.y + n.second->getSize().y);

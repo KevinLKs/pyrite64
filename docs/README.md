@@ -1,6 +1,8 @@
 # Pyrite64 Docs
 
-This project uses [Sphinx](https://www.sphinx-doc.org) to manage and generate documentation.
+This project uses [Sphinx](https://www.sphinx-doc.org) to generate the documentation.<br>
+The shared setup (theme, styling, C++ API generation, build tools) lives in [n64-docs](https://github.com/HailToDodongo/n64-docs),
+this directory only contains the content and config.
 
 ## Building Docs
 
@@ -25,17 +27,13 @@ pip install -r requirements.txt
 To generate the HTML docs, run:
 
 ```sh
-make html
+n64-docs build
 ```
-The final static website is then generated under `_build/html`.<br>
-In order to view it properly, a webserver needs to be started.
+The final static website is then generated under `_build/html`.
 
-Navigate into the `_build/html` directory and start a webserver:
+To build, serve and automatically rebuild on changes, run:
 ```sh
-python3 -m http.server
+n64-docs serve
 ```
-This should let you open the page on http://localhost:8000/index.html
-
-After making changes re-run the make command while the server can stay open.
-
-Alternatively, you can run the `./build_and_serve.sh` file to automate this.
+This lets you open the page on http://localhost:8000/index.html<br>
+By default the C++ API is skipped to keep builds fast, use `n64-docs serve --full` to include it.

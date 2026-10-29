@@ -56,6 +56,11 @@ namespace
     return res;
   }
 
+  bool isCodeHeader(const fs::path &path) {
+    auto ext = path.extension().string();
+    return ext == ".h" || ext == ".hpp";
+  }
+
   fs::path getAssetPath(Project::Project *project) {
     auto res = fs::path{project->getPath()} / "assets";
     if (!fs::exists(res)) {
@@ -79,6 +84,10 @@ namespace
     pathAbs = pathAbs.substr(basePath.length());
     if (!pathAbs.empty() && pathAbs.front() == '/') pathAbs.erase(pathAbs.begin());
     return pathAbs;
+  }
+
+  fs::path getEditorScriptPath(Project::Project *project) {
+    return fs::path{project->getPath()} / "scripts";
   }
 
   std::string changeExt(const std::string &path, const std::string &newExt)
@@ -107,6 +116,7 @@ namespace
 
       conf.data = doc.contains("data") ? doc["data"] : nlohmann::json::object();
       conf.exclude = doc["exclude"];
+      conf.autoRun = doc.value("autoRun", false);
     }
   }
 
@@ -144,6 +154,9 @@ namespace
     } else if (ext == ".p64graph") {
       type = Project::FileType::NODE_GRAPH;
       outPath = changeExt(outPath, ".pg");
+    } else if (ext == ".js" && getProjectRelPath(path.string(), projectBase).starts_with("scripts/")) {
+      type = Project::FileType::EDITOR_SCRIPT;
+      outPath.clear(); // editor only
     }
 
     if (type == Project::FileType::UNKNOWN) {
@@ -151,7 +164,7 @@ namespace
     }
 
     auto romPath = outPath;
-    romPath.replace(0, std::string{"filesystem/"}.length(), "rom:/");
+    if(!romPath.empty())romPath.replace(0, std::string{"filesystem/"}.length(), "rom:/");
 
     entry = Project::AssetManagerEntry{
       .name = path.filename().string(),
@@ -232,7 +245,7 @@ namespace
       .path = path.string(),
       .projectPath = getProjectRelPath(path.string(), fs::absolute(project->getPath()).string()),
       .type = type,
-      .params = Utils::CPP::parseDataStruct(code, "Data")
+      .params = Utils::CPP::parseScriptData(code, path, {fs::path{project->getPath()} / "src", getCodePath(project)})
     };
     entry.conf.uuid = uuid;
 
@@ -254,6 +267,7 @@ std::string Project::AssetConf::serialize() const {
     .set(fontId)
     .set(fontCharset)
     .set("exclude", exclude)
+    .set("autoRun", autoRun)
     .set("data", data)
     .toString();
 }
@@ -262,6 +276,8 @@ Project::AssetManager::AssetManager(Project* pr)
   : project{pr}
 {
   defaultObjScript = Utils::FS::loadTextFile("data/scripts/defaultObject.cpp");
+  defaultObjSharedScript = Utils::FS::loadTextFile("data/scripts/defaultObjectShared.cpp");
+  defaultObjDataHeader = Utils::FS::loadTextFile("data/scripts/defaultObjectData.h");
   defaultGlobalScript = Utils::FS::loadTextFile("data/scripts/defaultGlobal.cpp");
 }
 
@@ -408,7 +424,9 @@ void Project::AssetManager::startWatcher()
   if (!editorMode || !Utils::FileWatcher::isSupported())return;
 
   watcher = std::make_unique<Utils::FileWatcher>();
-  if (!watcher->start({getAssetPath(project), getCodePath(project)})) {
+  std::vector<fs::path> watchDirs{getAssetPath(project), getCodePath(project)};
+  if (fs::exists(getEditorScriptPath(project)))watchDirs.push_back(getEditorScriptPath(project));
+  if (!watcher->start(watchDirs)) {
     Utils::Logger::log("Asset file watcher unavailable, falling back to polling", Utils::Logger::LEVEL_WARN);
     watcher.reset();
   }
@@ -438,6 +456,7 @@ void Project::AssetManager::reload() {
       if (!buildAssetEntry(project, path, assetEntry)) {
         continue;
       }
+      assetEntry.fileAge = Utils::FS::getFileAge(path);
 
       // image previews are only needed when there is something to draw them in
       if (assetEntry.type == FileType::IMAGE) {
@@ -461,7 +480,8 @@ void Project::AssetManager::reload() {
   for (const auto &entry : fs::recursive_directory_iterator{codePath}) {
     if (entry.is_regular_file()) {
       auto path = entry.path();
-      if (path.extension().string() != ".cpp") continue;
+      bool isHeader = isCodeHeader(path);
+      if (path.extension().string() != ".cpp" && !isHeader) continue;
 
       std::error_code ec{};
       watchFiles[pathKey(path.string())] = entry.last_write_time(ec).time_since_epoch().count();
@@ -471,6 +491,19 @@ void Project::AssetManager::reload() {
       }
 
       entries[(int)codeEntry.type].push_back(codeEntry);
+    }
+  }
+
+  auto editorScriptPath = getEditorScriptPath(project);
+  if (fs::exists(editorScriptPath)) {
+    for (const auto &entry : fs::recursive_directory_iterator{editorScriptPath}) {
+      if (!entry.is_regular_file())continue;
+      AssetManagerEntry scriptEntry{};
+      if (!buildAssetEntry(project, entry.path(), scriptEntry))continue;
+      scriptEntry.fileAge = Utils::FS::getFileAge(entry.path());
+      std::error_code ec{};
+      watchFiles[pathKey(entry.path().string())] = entry.last_write_time(ec).time_since_epoch().count();
+      entries[(int)scriptEntry.type].push_back(scriptEntry);
     }
   }
 
@@ -645,6 +678,7 @@ bool Project::AssetManager::syncWithDisk()
 
   scanDir(getAssetPath(project), false);
   scanDir(getCodePath(project), true);
+  scanDir(getEditorScriptPath(project), false);
 
   for (const auto &pair : watchFiles) {
     if (!currentFiles.contains(pair.first)) {
@@ -794,8 +828,11 @@ void Project::AssetManager::save()
     auto pathMeta = entry->path + ".conf";
     auto json = entry->conf.serialize();
 
-    Utils::Logger::log("Asset meta-data changed, forcing recompile: " + entry->outPath, Utils::Logger::LEVEL_INFO);
-    fs::remove(project->getPath() + "/" + entry->outPath);
+    if (!entry->outPath.empty()) {
+      Utils::Logger::log("Asset meta-data changed, forcing recompile: " + entry->outPath, Utils::Logger::LEVEL_INFO);
+      std::error_code ec{};
+      fs::remove(fs::path{project->getPath()} / entry->outPath, ec);
+    }
     Utils::FS::saveTextFile(pathMeta, json);
 
     dirtyAssetMeta.erase(uuid);
@@ -880,7 +917,7 @@ void Project::AssetManager::clearNodeGraphDirty(uint64_t uuid)
   savedNodeGraphState.erase(uuid);
 }
 
-bool Project::AssetManager::createScript(const std::string &name, bool isGlobal, const std::string &subDir) {
+bool Project::AssetManager::createScript(const std::string &name, bool isGlobal, const std::string &subDir, bool sharedData) {
   // Catch forbidden characters
   if (name.find_first_of("/\\:*?\"<>|") != std::string::npos) {
     return false;
@@ -918,8 +955,24 @@ bool Project::AssetManager::createScript(const std::string &name, bool isGlobal,
     return false;
   }
 
-  auto code = isGlobal ? defaultGlobalScript : defaultObjScript;
+  bool useShared = sharedData && !isGlobal;
+  auto code = isGlobal ? defaultGlobalScript : (useShared ? defaultObjSharedScript : defaultObjScript);
   code = Utils::replaceAll(code, "__UUID__", uuidStr);
+
+  if (useShared) {
+    std::string structName{};
+    for (char c : name) structName += (isalnum((unsigned char)c) || c == '_') ? c : '_';
+    if (structName.empty() || isdigit((unsigned char)structName[0])) structName = "_" + structName;
+    structName += "Data";
+
+    auto headerPath = dirPath / (structName + ".h");
+    if (fs::exists(headerPath)) {
+      return false;
+    }
+
+    code = Utils::replaceAll(code, "__STRUCT__", structName);
+    Utils::FS::saveTextFile(headerPath, Utils::replaceAll(defaultObjDataHeader, "__STRUCT__", structName));
+  }
 
   Utils::FS::saveTextFile(filePath, code);
   if (!fs::exists(filePath)) {

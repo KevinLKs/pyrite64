@@ -3,6 +3,7 @@
 * @license MIT
 */
 #include "assetInspector.h"
+#include "assets/scriptEditor.h"
 #include "imgui.h"
 #include "../editorScene.h"
 #include "misc/cpp/imgui_stdlib.h"
@@ -128,6 +129,7 @@ void Editor::AssetInspector::draw() {
   }
 
   ImGui::Text("File: %s", asset->name.c_str());
+
   if (hasAssetConf && ImGui::CollapsingHeader("Settings", ImGuiTreeNodeFlags_DefaultOpen))
   {
     auto confBefore = asset->conf.serialize();
@@ -208,7 +210,12 @@ void Editor::AssetInspector::draw() {
       );
     }
 
-    if (asset->type != FileType::AUDIO && asset->type != FileType::MUSIC_XM)
+    if (asset->type == FileType::EDITOR_SCRIPT)
+    {
+      ImTable::addCheckBox("Auto Run", asset->conf.autoRun);
+      ImGui::SetItemTooltip("Runs this script whenever the project is opened");
+    }
+    else if (asset->type != FileType::AUDIO && asset->type != FileType::MUSIC_XM)
     {
       int compression = (int)asset->conf.compression;
       if(ImTable::addComboBox("Compression", compression, {
@@ -221,7 +228,9 @@ void Editor::AssetInspector::draw() {
       }
     }
 
-    ImTable::addCheckBox("Exclude", asset->conf.exclude);
+    if (asset->type != FileType::EDITOR_SCRIPT) {
+      ImTable::addCheckBox("Exclude", asset->conf.exclude);
+    }
 
     ImTable::end();
 
@@ -306,6 +315,9 @@ void Editor::AssetInspector::draw() {
     }
     if (asset->type == FileType::MUSIC_XM) {
       ImGui::TextDisabled("No preview available for XM modules");
+    }
+    if (asset->type == FileType::EDITOR_SCRIPT) {
+      ScriptEditor::draw(*asset);
     }
   }
 }

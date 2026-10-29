@@ -21,8 +21,6 @@
 #include "SDL3/SDL_dialog.h"
 #include "../imgui/notification.h"
 
-void ImDrawCallback_ImplSDLGPU3_SetSamplerRepeat(const ImDrawList* parent_list, const ImDrawCmd* cmd);
-
 namespace
 {
   bool isHoverAdd = false;
@@ -41,6 +39,15 @@ namespace
 
     ImGui::Text("%s", text);
     ImGui::PopFont();
+  }
+
+  void drawRepeatX(ImTextureID tex, ImVec2 pos, ImVec2 size, float tileW, float v0, float v1)
+  {
+    auto *dl = ImGui::GetWindowDrawList();
+    for(float x = 0; x < size.x; x += tileW) {
+      float fracX = std::min(tileW, size.x - x) / tileW;
+      dl->AddImage(tex, {pos.x + x, pos.y}, {pos.x + x + tileW * fracX, pos.y + size.y}, {0, v0}, {fracX, v1});
+    }
   }
 }
 
@@ -88,23 +95,23 @@ void Editor::Launcher::draw()
   ImVec2 centerPos = {io.DisplaySize.x / 2, io.DisplaySize.y / 2};
 
   // BG
-  ImGui::GetWindowDrawList()->AddCallback(ImDrawCallback_ImplSDLGPU3_SetSamplerRepeat, nullptr);
-
   float topBgHeight = 5_px;
   float bottomBgHeight = 2.5_px;
-  float bgRepeatsX = io.DisplaySize.x / texBG.getWidth();
-  ImGui::SetCursorPos({0,0});
-  ImGui::Image(ImTextureID(texBG.getGPUTex()),
-    {io.DisplaySize.x, (float)texBG.getHeight() * topBgHeight},
-    {0,topBgHeight}, {bgRepeatsX,0}
-  );
-  // bottom
+  ImVec2 winPos = ImGui::GetWindowPos();
+  ImTextureID bgTex = ImTextureID(texBG.getGPUTex());
+  float bgW = (float)texBG.getWidth();
+  float bgH = (float)texBG.getHeight();
 
-  ImGui::SetCursorPos({0, io.DisplaySize.y - ((float)texBG.getHeight() * bottomBgHeight)});
-  ImGui::Image(ImTextureID(texBG.getGPUTex()),
-    {io.DisplaySize.x, (float)texBG.getHeight() * bottomBgHeight},
-    {0,0}, {bgRepeatsX,bottomBgHeight}
-  );
+  // top: flipped texture at the bottom edge, edge row stretched above
+  float topH = bgH * topBgHeight;
+  drawRepeatX(bgTex, winPos, {io.DisplaySize.x, topH - bgH}, bgW, 1, 1);
+  drawRepeatX(bgTex, {winPos.x, winPos.y + topH - bgH}, {io.DisplaySize.x, bgH}, bgW, 1, 0);
+
+  // bottom: texture at the top edge, edge row stretched down
+  float bottomH = bgH * bottomBgHeight;
+  float bottomY = winPos.y + io.DisplaySize.y - bottomH;
+  drawRepeatX(bgTex, {winPos.x, bottomY}, {io.DisplaySize.x, bgH}, bgW, 0, 1);
+  drawRepeatX(bgTex, {winPos.x, bottomY + bgH}, {io.DisplaySize.x, bottomH - bgH}, bgW, 1, 1);
 
   float midBgPointY = (float)texBG.getHeight() * topBgHeight;
   midBgPointY += io.DisplaySize.y - ((float)texBG.getHeight() * bottomBgHeight);
@@ -129,8 +136,6 @@ void Editor::Launcher::draw()
     float actionH = texBtnOpen.getSize(mainScale).y * zoom;
     cardsY = recentsRowY + recentH + 90_px + actionH * 0.5f;
   }
-
-  ImGui::GetWindowDrawList()->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
 
   // Title
   if (isHoverAdd || isHoverLast) {

@@ -16,6 +16,8 @@
 #include "cli.h"
 #include "build/projectBuilder.h"
 #include "editor/actions.h"
+#include "editor/actionSearch.h"
+#include "editor/script/scriptHost.h"
 #include "editor/window.h"
 #include "editor/imgui/theme.h"
 #include "editor/pages/launcher.h"
@@ -43,6 +45,7 @@
 
 #include "editor/undoRedo.h"
 #include "editor/actions.h"
+#include "editor/script/scriptHost.h"
 
 Context ctx{};
 constinit SDL_GPUSampler *texSamplerRepeat{nullptr};
@@ -50,12 +53,6 @@ constinit SDL_GPUSampler *texSamplerRepeat{nullptr};
 namespace T3DM
 {
   thread_local Config config{};
-}
-
-void ImDrawCallback_ImplSDLGPU3_SetSamplerRepeat(const ImDrawList* parent_list, const ImDrawCmd* cmd) {
-  auto*           state   = static_cast<ImGui_ImplSDLGPU3_RenderState*>(ImGui::GetPlatformIO().Renderer_RenderState);
-  //SDL_GPUSampler* sampler = cmd->UserCallbackData ? static_cast<SDL_GPUSampler*>(cmd->UserCallbackData) : state->SamplerDefault;
-  state->SamplerCurrent   = texSamplerRepeat;//sampler;
 }
 
 void cli(argparse::ArgumentParser &prog);
@@ -453,6 +450,7 @@ int main(int argc, char** argv)
         editorMain.draw();
       }
 
+      Editor::ActionSearch::draw();
       Editor::Noti::draw();
 
       ctx.timeCpuSelf = SDL_GetTicksNS() - ticksSelf;
@@ -472,6 +470,7 @@ int main(int argc, char** argv)
         // Remember this project's open windows before tearing it down (covers app exit too).
         if(ctx.editorScene) ctx.editorScene->onProjectClosing();
         Editor::UndoRedo::getHistory().clear();
+        Editor::ScriptHost::stop();
         delete ctx.project;
         ctx.project = nullptr;
         ctx.wantsProjectClose = false;

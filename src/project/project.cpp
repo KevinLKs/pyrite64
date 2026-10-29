@@ -174,11 +174,11 @@ void Project::Project::deserialize(const nlohmann::json &doc) {
 }
 
 Project::Project::Project(const std::string &p64projPath, bool editorMode)
-  : pathConfig{p64projPath}
+  : pathConfig{fs::absolute(p64projPath).lexically_normal().string()}
 {
   assets.setEditorMode(editorMode);
 
-  path = fs::path(p64projPath).parent_path().string();
+  path = fs::path(pathConfig).parent_path().string();
 
   auto configJSON = Utils::JSON::loadFile(pathConfig);
   if (configJSON.empty()) {
