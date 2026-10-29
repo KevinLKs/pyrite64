@@ -69,6 +69,12 @@ namespace P64::Comp
         return vertexScale;
       }
 
+      // Poke64 fork (2026-10-26): clip count, so scripts can find clips by name
+      // (player idle/walk/run in src/user/PlayerController.cpp).
+      int16_t getAnimCount() const {
+        return model ? (int16_t)t3d_model_get_animation_count(model) : 0;
+      }
+
     static uint32_t getAllocSize([[maybe_unused]] uint16_t* initData);
 
     static void initDelete([[maybe_unused]] Object& obj, AnimModel* data, void* initData);

@@ -125,6 +125,14 @@ A Material Instance slot set to "Texture" with no texture picked now fails the b
 
 Pyrite copies `n64/engine/` into a project's `engine/` folder on every build, so this file is where the change has to live. On an upstream merge, re-apply it if `animModel.h` changed upstream; nothing else depends on it.
 
+## 8. Runtime: AnimModel clip count (2026-10-26)
+
+| File | Change | Why |
+| --- | --- | --- |
+| `n64/engine/include/scene/components/animModel.h` | Public inline getter `getAnimCount()`: number of clips in the model, 0 before setup. | Poke64's player controller looks up its idle, walk and run clips by name, which needs the clip count to loop over `getAnim(i)` safely. |
+
+Same rule as section 7: re-apply on an upstream merge if `animModel.h` changed upstream.
+
 ## Known limits, compatibility and how to verify
 
 Project files written by this fork are the same format as upstream's, so a project can move between the two editors. The fork does not change the scene or prefab format, file migration, or the N64 engine.
