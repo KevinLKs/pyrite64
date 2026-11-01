@@ -128,6 +128,9 @@ namespace Project
       std::unordered_map<std::string, std::pair<int, int>> pathIndex{};
 
       std::unordered_set<uint64_t> dirtyPrefabs{};
+
+      // getModelMaterialsOnly() results for models that were not fully loaded (fork)
+      std::unordered_map<uint64_t, Assets::Model3D> materialOnlyCache{};
       std::unordered_set<uint64_t> dirtyAssetMeta{};
       std::unordered_set<uint64_t> dirtyNodeGraphs{};
       std::unordered_map<uint64_t, std::string> savedPrefabState{};
@@ -166,6 +169,12 @@ namespace Project
 
       // Import scale of a model. Cheap: reads only the glTF header data, the model is not loaded.
       float getModelScale(uint64_t uuid);
+
+      // Fork: a model's materials for build-time validation (MaterialInstance::validateWithModel)
+      // without parsing meshes or animations. Returns the full model if it is already loaded,
+      // otherwise the saved conf materials whose names exist in the glTF. Placeholders (dynType)
+      // only ever come from the conf, see Assets::Material::fromT3D.
+      const Assets::Model3D& getModelMaterialsOnly(uint64_t uuid);
       void reload();
       void reloadAssetByUUID(uint64_t uuid);
       bool pollWatch();

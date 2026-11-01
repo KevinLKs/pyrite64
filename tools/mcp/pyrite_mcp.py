@@ -32,14 +32,26 @@ PORT = int(os.environ.get("PYRITE_MCP_PORT", "6464"))
 
 JS_API = """
 Editor script globals (JavaScript, QuickJS):
-  scene.list() -> [{id,name}]            scene.current() -> {id,name,objectCount} | null
+  scene.list() -> [{id,name,loaded,onBoot,onReset}]   scene.current() -> {id,name,objectCount} | null
   scene.load(id)                          scene.objects(rootUUID?, maxDepth?) -> tree summary
+  scene.newScene(name?, open=true)        scene.rename(name) | scene.rename(id, name)
+  scene.duplicate(id, name?)              scene.deleteScene(id, force=false)
+  scene.config() / scene.setConfig(patch) open scene's settings (fb size, clear color, physics, layers...)
   scene.find(text) -> [SceneObject]       scene.get(uuid) -> SceneObject | null
   scene.create(name, parentUUID?)         scene.addModel(assetUUID) / scene.addPrefab(assetUUID)
   scene.addJSON(objJson, parentUUID?)     scene.serialize(uuid) -> full object JSON incl. components
   scene.remove(uuid)                      scene.move(uuid, targetUUID (0 = root), asChild = true)
   scene.select([uuids])                   scene.setEnabled(uuid, bool)
   scene.addComponent(uuid, idOrName) -> componentUUID   scene.removeComponent(uuid, componentUUID)
+  scene.getComponent(uuid, compUUID) -> {uuid,id,type,name,enabled,data}
+  scene.setComponent(uuid, compUUID, {name?, enabled?, data?})   data is merge-patched
+  scene.setProps(uuid, {name, enabled, selectable, visMask, proportionalScale})
+  scene.createPrefab(uuid, subDir?) -> prefabAssetUUID   scene.unpackPrefab(uuid)
+  project.config() / project.setConfig(patch)   name, romName, sceneIdOnBoot, sceneIdOnReset, debugMenu,
+    collLayer0..7, visLayer0..7, romHeader, metadata, pathEmu, pathN64Inst
+  assets.config(uuid) / assets.setConfig(uuid, patch)   import settings (format, baseScaleOverride,
+    gltfBVH, compression, exclude, autoRun, wav*, font*, data)
+  assets.createScript(name, isGlobal=false, subDir?)    assets.createNodeGraph(name) -> uuid
   assets.list(type?) type: image|audio|font|model|code_object|code_global|prefab|node_graph|music|editor_script
   assets.get(assetUUID) -> {uuid,name,path,type,animations?}
   components.list() -> [{id,name}]
@@ -47,7 +59,9 @@ Editor script globals (JavaScript, QuickJS):
   history.markChanged(desc) history.undo() history.redo()
   console.log(text) console.read(maxChars?)
 SceneObject: .uuid .name .pos {x,y,z} .rot quaternion {x,y,z,w} .scale {x,y,z} (assignable)
-Asset UUIDs are strings (64-bit). Object UUIDs are numbers.
+Asset and component UUIDs are strings (64-bit). Object UUIDs are numbers.
+setConfig/setComponent patches follow JSON merge-patch: objects merge, arrays are replaced whole,
+null deletes a key.
 Each call runs in its own block scope; use globalThis.name = ... to keep helpers between calls.
 After changing the scene call history.markChanged("what changed") so it can be undone.
 The value of the last expression is returned (objects as JSON).
@@ -235,6 +249,59 @@ def pyrite_load_scene(scene_id: int) -> Any:
     return js(f"scene.load({int(scene_id)}); scene.current()")
 
 
+# ---------------------------------------------------------------- scenes
+
+@mcp.tool()
+def pyrite_create_scene(name: str, open_scene: bool = True) -> Any:
+    """Creates a new empty scene with this name. The open scene is saved first. open_scene=False
+    creates it and switches back to the scene that was open."""
+    return js(f"scene.newScene({q(name)}, {q(open_scene)})")
+
+
+@mcp.tool()
+def pyrite_rename_scene(name: str, scene_id: int | None = None) -> Any:
+    """Renames a scene. Without scene_id it renames the open scene."""
+    if scene_id is None:
+        return js(f"scene.rename({q(name)})")
+    return js(f"scene.rename({int(scene_id)}, {q(name)})")
+
+
+@mcp.tool()
+def pyrite_duplicate_scene(scene_id: int, name: str | None = None) -> Any:
+    """Copies a scene (all objects and settings) to a new id. Default name is "<name> Copy"."""
+    return js(f"scene.duplicate({int(scene_id)}, {q(name)})")
+
+
+@mcp.tool()
+def pyrite_delete_scene(scene_id: int, force: bool = False) -> Any:
+    """Deletes a scene folder from disk. This can't be undone. Refuses the last scene, and the
+    boot or reset scene unless force=True. Ask the user before calling this."""
+    return js(f"scene.deleteScene({int(scene_id)}, {q(force)})")
+
+
+@mcp.tool()
+def pyrite_scene_settings(patch: dict | None = None) -> Any:
+    """Reads the open scene's settings, or changes them when patch is given (JSON merge-patch:
+    nested objects merge, arrays such as layers3D are replaced whole). Keys include name,
+    fbWidth, fbHeight, fbFormat, clearColor, doClearColor, doClearDepth, renderPipeline,
+    frameLimit, filter, audioFreq, physicsTickRate, gravity, renderScale, layers3D/layersPtx/layers2D."""
+    if patch is None:
+        return js("scene.config()")
+    return js(f"const r = scene.setConfig({q(patch)}); history.markChanged('Scene Settings'); r")
+
+
+@mcp.tool()
+def pyrite_project_settings(patch: dict | None = None) -> Any:
+    """Reads project settings, or changes them when patch is given (JSON merge-patch). Keys include
+    name, romName, sceneIdOnBoot, sceneIdOnReset, debugMenu, collLayer0..7, visLayer0..7,
+    romHeader, metadata, pathEmu, pathN64Inst. Call pyrite_save afterwards to write them."""
+    if patch is None:
+        return js("project.config()")
+    return js(f"project.setConfig({q(patch)})")
+
+
+# ---------------------------------------------------------------- objects
+
 @mcp.tool()
 def pyrite_scene_tree(root_uuid: int | None = None, max_depth: int = 3) -> Any:
     """Returns the object hierarchy of the open scene (uuid, name, transform, components, children).
@@ -251,7 +318,8 @@ def pyrite_find_objects(name_contains: str) -> Any:
 @mcp.tool()
 def pyrite_get_object(uuid: int) -> Any:
     """Returns the full serialized JSON of one object, including all component settings.
-    The same format can be passed to pyrite_run_js via scene.addJSON(json, parentUUID)."""
+    The same format can be passed to pyrite_run_js via scene.addJSON(json, parentUUID).
+    To change one component's settings use pyrite_set_component instead."""
     return js(f"scene.serialize({int(uuid)})")
 
 
@@ -368,10 +436,90 @@ def pyrite_delete_objects(uuids: list[int]) -> Any:
 @mcp.tool()
 def pyrite_add_component(uuid: int, component: str) -> Any:
     """Adds a component to an object by name ("Light", "Model (Static)", "Collider", ...) or id.
-    Returns the new component's UUID. Configure it afterwards via pyrite_get_object and
-    pyrite_run_js if needed."""
+    Returns the new component's UUID. Configure it afterwards with pyrite_set_component."""
     return js(f"const c = scene.addComponent({int(uuid)}, {q(component)});"
               f" history.markChanged('Add Component'); ({{componentUUID: c}})")
+
+
+@mcp.tool()
+def pyrite_get_component(uuid: int, component_uuid: str) -> Any:
+    """Returns one component's settings (data) by object uuid and component uuid
+    (component uuids are listed by pyrite_scene_tree)."""
+    return js(f"scene.getComponent({int(uuid)}, {q(str(component_uuid))})")
+
+
+@mcp.tool()
+def pyrite_set_component(uuid: int, component_uuid: str, data: dict | None = None,
+                         name: str | None = None, enabled: bool | None = None) -> Any:
+    """Changes a component's settings. data is merge-patched onto the current settings, so pass only
+    the fields to change (read them first with pyrite_get_component). Undoable."""
+    patch: dict = {}
+    if data is not None:
+        patch["data"] = data
+    if name is not None:
+        patch["name"] = name
+    if enabled is not None:
+        patch["enabled"] = enabled
+    return js(f"const r = scene.setComponent({int(uuid)}, {q(str(component_uuid))}, {q(patch)});"
+              " history.markChanged('Edit Component'); r")
+
+
+@mcp.tool()
+def pyrite_remove_component(uuid: int, component_uuid: str) -> Any:
+    """Removes a component from an object. Undoable."""
+    return js(f"scene.removeComponent({int(uuid)}, {q(str(component_uuid))});"
+              " history.markChanged('Remove Component'); true")
+
+
+@mcp.tool()
+def pyrite_set_object_props(uuid: int, name: str | None = None, enabled: bool | None = None,
+                            selectable: bool | None = None, vis_mask: int | None = None,
+                            proportional_scale: bool | None = None) -> Any:
+    """Sets object properties other than the transform: name, enabled, selectable,
+    visibility layer mask (bit 0 = layer 0) and proportional scaling. Undoable."""
+    patch = {k: v for k, v in {"name": name, "enabled": enabled, "selectable": selectable,
+                               "visMask": vis_mask, "proportionalScale": proportional_scale}.items()
+             if v is not None}
+    return js(f"const r = scene.setProps({int(uuid)}, {q(patch)}); history.markChanged('Edit Object'); r")
+
+
+@mcp.tool()
+def pyrite_create_prefab(uuid: int, sub_dir: str | None = None) -> Any:
+    """Saves an object (with its children) as a prefab asset and returns the prefab's asset uuid."""
+    return js(f"const r = scene.createPrefab({int(uuid)}, {q(sub_dir or '')});"
+              " history.markChanged('Create Prefab'); ({prefabUUID: r})")
+
+
+@mcp.tool()
+def pyrite_unpack_prefab(uuid: int) -> Any:
+    """Turns a prefab instance into normal, editable scene objects. Undoable."""
+    return js(f"const r = scene.unpackPrefab({int(uuid)}); history.markChanged('Unpack Prefab'); r")
+
+
+# ---------------------------------------------------------------- assets
+
+@mcp.tool()
+def pyrite_asset_settings(asset_uuid: str, patch: dict | None = None) -> Any:
+    """Reads an asset's import settings, or changes them when patch is given. Fields: format,
+    baseScale, baseScaleOverride (0 = auto), gltfBVH, compression, exclude, autoRun,
+    wavForceMono, wavResampleRate, wavCompression, fontId, fontCharset, data (merge-patched).
+    Call pyrite_save afterwards to write the asset's .conf file."""
+    if patch is None:
+        return js(f"assets.config({q(str(asset_uuid))})")
+    return js(f"assets.setConfig({q(str(asset_uuid))}, {q(patch)})")
+
+
+@mcp.tool()
+def pyrite_create_script(name: str, is_global: bool = False, sub_dir: str | None = None) -> Any:
+    """Creates a new C++ script asset from the editor's template. is_global=False makes an
+    object script (used with the Code component), True a global script."""
+    return js(f"assets.createScript({q(name)}, {q(is_global)}, {q(sub_dir or '')})")
+
+
+@mcp.tool()
+def pyrite_create_node_graph(name: str) -> Any:
+    """Creates a new node graph asset and returns its uuid."""
+    return js(f"({{uuid: assets.createNodeGraph({q(name)})}})")
 
 
 @mcp.tool()

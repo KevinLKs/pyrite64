@@ -198,7 +198,7 @@ void Build::buildScene(Project::Project &project, const Project::SceneEntry &sce
     objCount += writeObject(ctx, *child, false, child->runtimeId, 0, false);
   }
 
-  ctx.fileObj.writeToFile(fsDataPath / fileNameObj);
+  ctx.fileObj.writeToFileIfChanged(fsDataPath / fileNameObj);
 
   ctx.fileScene = {};
   ctx.fileScene.write<uint16_t>(sc->conf.fbWidth);
@@ -256,7 +256,7 @@ void Build::buildScene(Project::Project &project, const Project::SceneEntry &sce
   for(const auto &layer : sc->conf.layers2D)writeLayer(layer);
 
   ctx.fileScene.align(4);
-  ctx.fileScene.writeToFile(fsDataPath / fileNameScene);
+  ctx.fileScene.writeToFileIfChanged(fsDataPath / fileNameScene);
 
   ctx.files.push_back("filesystem/p64/" + fileNameScene);
   ctx.files.push_back("filesystem/p64/" + fileNameObj);

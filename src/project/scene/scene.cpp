@@ -484,7 +484,16 @@ void Project::Scene::deserialize(const std::string &data)
     nullptr, false);
   if (!doc.is_object())return;
 
-  auto &docConf = doc["conf"];
+  deserializeConf(doc["conf"]);
+
+  removeAllObjects();
+  if(!doc.contains("graph"))return;
+  auto docGraph = doc["graph"];
+  root.deserialize(this, docGraph);
+}
+
+void Project::Scene::deserializeConf(nlohmann::json &docConf)
+{
   {
     Utils::JSON::readProp(docConf, conf.name, std::string{"New Scene"});
     conf.fbWidth = docConf.value("fbWidth", 320);
@@ -539,11 +548,6 @@ void Project::Scene::deserialize(const std::string &data)
       resetLayers();
     }
   }
-
-  removeAllObjects();
-  if(!doc.contains("graph"))return;
-  auto docGraph = doc["graph"];
-  root.deserialize(this, docGraph);
 }
 
 uint32_t Project::Scene::assignRuntimeIds()

@@ -7,7 +7,15 @@
 *   scene.addPrefab(assetUUID) / scene.addJSON(json, parentUUID?) / scene.serialize(uuid)
 *   scene.remove(uuid) / scene.move(uuid, targetUUID, asChild?) / scene.select(uuids)
 *   scene.setEnabled(uuid, bool) / scene.addComponent(uuid, idOrName) / scene.removeComponent(uuid, compUUID)
-*   assets.list(type?) / assets.get(uuid)
+*   scene.newScene(name?, open = true) / scene.rename(name) or rename(id, name)
+*   scene.duplicate(id, name?) / scene.deleteScene(id, force = false)
+*   scene.config() / scene.setConfig(patch)
+*   scene.setProps(uuid, {name, enabled, selectable, visMask, proportionalScale})
+*   scene.getComponent(uuid, compUUID) / scene.setComponent(uuid, compUUID, {name?, enabled?, data?})
+*   scene.createPrefab(uuid, subDir?) / scene.unpackPrefab(uuid)
+*   project.config() / project.setConfig(patch)
+*   assets.list(type?) / assets.get(uuid) / assets.config(uuid) / assets.setConfig(uuid, patch)
+*   assets.createScript(name, isGlobal = false, subDir?) / assets.createNodeGraph(name)
 *   components.list()
 *   console.read(maxChars?)
 *   editor.isBuilding()
@@ -23,6 +31,8 @@
 #include "../../../project/assetManager.h"
 #include "../../../project/component/components.h"
 #include "../../../utils/logger.h"
+#include "../../../utils/fs.h"
+#include "../../../project/project.h"
 #include "json.hpp"
 
 #include <algorithm>
@@ -175,15 +185,15 @@ namespace
     scene.objectsMap.erase(obj.uuid);
   }
 
+  Json sceneEntryJson(int id, const std::string &fileName); // scene management helpers below
+
   //########// scene //########//
 
   JSValue sceneList(JSContext *c, JSValueConst, int, JSValueConst*)
   {
     if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
     Json arr = Json::array();
-    for(auto &e : ctx.project->getScenes().getEntries()) {
-      arr.push_back(Json{{"id", e.id}, {"name", e.name}});
-    }
+    for(auto &e : ctx.project->getScenes().getEntries())arr.push_back(sceneEntryJson(e.id, e.name));
     return fromJson(c, arr);
   }
 
@@ -481,6 +491,457 @@ namespace
     return JS_NewBool(c, ctx.isBuildOrRunning());
   }
 
+
+  //########// scene management helpers //########//
+
+  // Name as the editor sees it: the open scene's in-memory name wins over the file
+  Json sceneEntryJson(int id, const std::string &fileName)
+  {
+    auto *loaded = ctx.project->getScenes().getLoadedScene();
+    bool isLoaded = loaded && loaded->getId() == id;
+    return Json{
+      {"id", id},
+      {"name", isLoaded ? loaded->getName() : fileName},
+      {"loaded", isLoaded},
+      {"onBoot", (int)ctx.project->conf.sceneIdOnBoot == id},
+      {"onReset", (int)ctx.project->conf.sceneIdOnReset == id},
+    };
+  }
+
+  const Project::SceneEntry* findSceneEntry(int id)
+  {
+    for(auto &e : ctx.project->getScenes().getEntries()) {
+      if(e.id == id)return &e;
+    }
+    return nullptr;
+  }
+
+  int maxSceneId()
+  {
+    int id = 0;
+    for(auto &e : ctx.project->getScenes().getEntries())id = std::max(id, e.id);
+    return id;
+  }
+
+  std::string sceneFilePath(int id)
+  {
+    return ctx.project->getPath() + "/data/scenes/" + std::to_string(id) + "/scene.json";
+  }
+
+  // Renames a scene that is not open by editing its file
+  bool renameSceneFile(int id, const std::string &name)
+  {
+    auto path = sceneFilePath(id);
+    auto text = Utils::FS::loadTextFile(path);
+    if(text.empty())return false;
+    auto doc = Json::parse(text, nullptr, false);
+    if(doc.is_discarded() || !doc.is_object())return false;
+    doc["conf"]["name"] = name;
+    Utils::FS::saveTextFile(path, doc.dump(2));
+    return true;
+  }
+
+  bool readSceneId(JSContext *c, JSValueConst v, int &out)
+  {
+    int32_t id{};
+    if(JS_ToInt32(c, &id, v) != 0)return false;
+    out = id;
+    return true;
+  }
+
+  bool readJsonArg(JSContext *c, JSValueConst v, Json &out)
+  {
+    std::string text{};
+    if(JS_IsString(v)) {
+      text = toString(v, c);
+    } else {
+      JSValue str = JS_JSONStringify(c, v, JS_UNDEFINED, JS_UNDEFINED);
+      if(JS_IsException(str))return false;
+      text = toString(str, c);
+      JS_FreeValue(c, str);
+    }
+    out = Json::parse(text, nullptr, false);
+    if(out.is_discarded()) {
+      JS_ThrowTypeError(c, "invalid JSON");
+      return false;
+    }
+    return true;
+  }
+
+  void afterSceneSwitch()
+  {
+    if(auto *scene = ctx.project->getScenes().getLoadedScene())ctx.sanitizeObjectSelection(scene);
+  }
+
+  //########// scene management //########//
+
+  // scene.newScene(name?, open = true) -> {id, name, ...}
+  JSValue sceneNew(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
+    auto &scenes = ctx.project->getScenes();
+    bool open = (argc > 1 && !JS_IsUndefined(argv[1])) ? JS_ToBool(c, argv[1]) : true;
+    auto *prev = scenes.getLoadedScene();
+    int prevId = prev ? prev->getId() : 0;
+
+    scenes.add();
+    int newId = maxSceneId();
+    if(newId <= 0)return JS_ThrowInternalError(c, "failed to create scene folder");
+
+    // loadScene saves the open scene first, then opens the new (empty) one
+    scenes.loadScene(newId);
+    auto *scene = scenes.getLoadedScene();
+    if(!scene)return JS_ThrowInternalError(c, "failed to open new scene");
+    if(argc > 0 && JS_IsString(argv[0]))scene->conf.name.value = toString(argv[0], c);
+    scene->save();
+    scenes.reload();
+
+    if(!open && prevId > 0)scenes.loadScene(prevId);
+    afterSceneSwitch();
+    auto *e = findSceneEntry(newId);
+    return fromJson(c, sceneEntryJson(newId, e ? e->name : std::string{}));
+  }
+
+  // scene.rename(name) renames the open scene, scene.rename(id, name) any scene
+  JSValue sceneRename(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
+    auto &scenes = ctx.project->getScenes();
+    auto *loaded = scenes.getLoadedScene();
+
+    int id = 0;
+    std::string name{};
+    bool hasId = argc >= 2 && !JS_IsUndefined(argv[1]);
+    if(argc >= 1 && !hasId) {
+      if(!loaded)return JS_ThrowReferenceError(c, "no scene loaded");
+      id = loaded->getId();
+      name = toString(argv[0], c);
+    } else if(hasId) {
+      if(!readSceneId(c, argv[0], id))return JS_EXCEPTION;
+      name = toString(argv[1], c);
+    } else {
+      return JS_ThrowTypeError(c, "rename expects (name) or (id, name)");
+    }
+    if(name.empty())return JS_ThrowTypeError(c, "name must not be empty");
+    if(!findSceneEntry(id))return JS_ThrowReferenceError(c, "scene %d not found", id);
+
+    if(loaded && loaded->getId() == id) {
+      loaded->conf.name.value = name;
+      loaded->save();
+    } else if(!renameSceneFile(id, name)) {
+      return JS_ThrowInternalError(c, "could not update scene %d's file", id);
+    }
+    scenes.reload();
+    return fromJson(c, sceneEntryJson(id, name));
+  }
+
+  // scene.duplicate(id, name?) -> new scene entry; default name is "<name> Copy"
+  JSValue sceneDuplicate(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
+    auto &scenes = ctx.project->getScenes();
+    int id = 0;
+    if(argc < 1 || !readSceneId(c, argv[0], id))return JS_ThrowTypeError(c, "duplicate expects (id, name?)");
+    auto *src = findSceneEntry(id);
+    if(!src)return JS_ThrowReferenceError(c, "scene %d not found", id);
+
+    auto *loaded = scenes.getLoadedScene();
+    std::string srcName = (loaded && loaded->getId() == id) ? loaded->getName() : src->name;
+    // copy what's on screen, not the last save
+    if(loaded && loaded->getId() == id)loaded->save();
+
+    scenes.duplicate(id);
+    int newId = maxSceneId();
+    std::string name = (argc > 1 && JS_IsString(argv[1])) ? toString(argv[1], c) : srcName + " Copy";
+    renameSceneFile(newId, name);
+    scenes.reload();
+    return fromJson(c, sceneEntryJson(newId, name));
+  }
+
+  // scene.deleteScene(id, force = false). Refuses the last scene, and the boot/reset scene unless forced.
+  JSValue sceneDelete(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
+    auto &scenes = ctx.project->getScenes();
+    int id = 0;
+    if(argc < 1 || !readSceneId(c, argv[0], id))return JS_ThrowTypeError(c, "deleteScene expects (id, force?)");
+    bool force = argc > 1 ? JS_ToBool(c, argv[1]) : false;
+    if(!findSceneEntry(id))return JS_ThrowReferenceError(c, "scene %d not found", id);
+    if(scenes.getEntries().size() <= 1)return JS_ThrowRangeError(c, "can't delete the only scene");
+    bool isBoot = (int)ctx.project->conf.sceneIdOnBoot == id;
+    bool isReset = (int)ctx.project->conf.sceneIdOnReset == id;
+    if((isBoot || isReset) && !force) {
+      return JS_ThrowRangeError(c, "scene %d is the %s scene, pass force = true or change it first",
+        id, isBoot ? "boot" : "reset");
+    }
+    scenes.remove(id);
+    afterSceneSwitch();
+    return JS_TRUE;
+  }
+
+  JSValue sceneConfig(JSContext *c, JSValueConst, int, JSValueConst*)
+  {
+    auto *scene = getScene(c);
+    if(!scene)return JS_EXCEPTION;
+    return fromJson(c, scene->conf.serialize());
+  }
+
+  // Merge-patches the open scene's settings (RFC 7386: arrays such as layers3D are replaced whole)
+  JSValue sceneSetConfig(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    auto *scene = getScene(c);
+    if(!scene)return JS_EXCEPTION;
+    Json patch{};
+    if(argc < 1 || !readJsonArg(c, argv[0], patch) || !patch.is_object()) {
+      return JS_ThrowTypeError(c, "setConfig expects ({...})");
+    }
+    try {
+      Json conf = scene->conf.serialize();
+      conf.merge_patch(patch);
+      scene->deserializeConf(conf);
+    } catch(const std::exception &ex) {
+      return JS_ThrowTypeError(c, "bad value: %s", ex.what());
+    }
+    return fromJson(c, scene->conf.serialize());
+  }
+
+  // scene.setProps(uuid, {name, enabled, selectable, visMask, proportionalScale})
+  JSValue sceneSetProps(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    auto *scene = getScene(c);
+    if(!scene)return JS_EXCEPTION;
+    uint32_t uuid{};
+    Json p{};
+    if(argc < 2 || !readU32(c, argv[0], uuid) || !readJsonArg(c, argv[1], p) || !p.is_object()) {
+      return JS_ThrowTypeError(c, "setProps expects (uuid, {...})");
+    }
+    auto obj = scene->getObjectByUUID(uuid);
+    if(!obj)return JS_ThrowReferenceError(c, "object %u not found", uuid);
+    try {
+      if(p.contains("name"))obj->name = p["name"].get<std::string>();
+      if(p.contains("enabled"))obj->enabled = p["enabled"].get<bool>();
+      if(p.contains("selectable"))obj->selectable = p["selectable"].get<bool>();
+      if(p.contains("proportionalScale"))obj->proportionalScale = p["proportionalScale"].get<bool>();
+      if(p.contains("visMask"))obj->visMask.value = p["visMask"].get<uint32_t>();
+    } catch(const std::exception &ex) {
+      return JS_ThrowTypeError(c, "bad value: %s", ex.what());
+    }
+    return fromJson(c, objSummary(*obj, 0, 0));
+  }
+
+  Project::Component::Entry* findComponent(JSContext *c, Project::Scene *scene, JSValueConst vObj, JSValueConst vComp, std::shared_ptr<Project::Object> &objOut)
+  {
+    uint32_t uuid{};
+    uint64_t compUUID{};
+    if(!readU32(c, vObj, uuid) || !readU64(c, vComp, compUUID)) {
+      JS_ThrowTypeError(c, "expects (uuid, componentUUID)");
+      return nullptr;
+    }
+    objOut = scene->getObjectByUUID(uuid);
+    if(!objOut) {
+      JS_ThrowReferenceError(c, "object %u not found", uuid);
+      return nullptr;
+    }
+    for(auto &comp : objOut->components) {
+      if(comp.uuid == compUUID)return &comp;
+    }
+    if(objOut->isPrefabInstance()) {
+      JS_ThrowReferenceError(c, "component not on object %u (prefab instance: edit the prefab or unpackPrefab first)", uuid);
+    } else {
+      JS_ThrowReferenceError(c, "component not found on object %u", uuid);
+    }
+    return nullptr;
+  }
+
+  Json componentJson(const Project::Component::Entry &comp)
+  {
+    auto &info = Project::Component::TABLE[comp.id];
+    return Json{
+      {"uuid", std::to_string(comp.uuid)},
+      {"id", comp.id},
+      {"type", info.name},
+      {"name", comp.name},
+      {"enabled", comp.enabled.value},
+      {"data", info.funcSerialize ? info.funcSerialize(comp) : Json::object()},
+    };
+  }
+
+  JSValue sceneGetComponent(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    auto *scene = getScene(c);
+    if(!scene)return JS_EXCEPTION;
+    if(argc < 2)return JS_ThrowTypeError(c, "getComponent expects (uuid, componentUUID)");
+    std::shared_ptr<Project::Object> obj{};
+    auto *comp = findComponent(c, scene, argv[0], argv[1], obj);
+    if(!comp)return JS_EXCEPTION;
+    return fromJson(c, componentJson(*comp));
+  }
+
+  // scene.setComponent(uuid, compUUID, {name?, enabled?, data?}); data is merge-patched onto the current settings
+  JSValue sceneSetComponent(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    auto *scene = getScene(c);
+    if(!scene)return JS_EXCEPTION;
+    if(argc < 3)return JS_ThrowTypeError(c, "setComponent expects (uuid, componentUUID, {name?, enabled?, data?})");
+    std::shared_ptr<Project::Object> obj{};
+    auto *comp = findComponent(c, scene, argv[0], argv[1], obj);
+    if(!comp)return JS_EXCEPTION;
+    Json p{};
+    if(!readJsonArg(c, argv[2], p) || !p.is_object())return JS_ThrowTypeError(c, "third argument must be an object");
+
+    auto &info = Project::Component::TABLE[comp->id];
+    try {
+      // build the new data first so a bad patch leaves the component untouched
+      std::shared_ptr<void> newData{};
+      if(p.contains("data")) {
+        if(!info.funcSerialize || !info.funcDeserialize)return JS_ThrowTypeError(c, "component has no editable data");
+        Json data = info.funcSerialize(*comp);
+        data.merge_patch(p["data"]);
+        newData = info.funcDeserialize(data);
+        if(!newData)return JS_ThrowTypeError(c, "component rejected the data");
+      }
+      if(p.contains("name"))comp->name = p["name"].get<std::string>();
+      if(p.contains("enabled"))comp->enabled.value = p["enabled"].get<bool>();
+      if(newData)comp->data = newData;
+    } catch(const std::exception &ex) {
+      return JS_ThrowTypeError(c, "bad value: %s", ex.what());
+    }
+    return fromJson(c, componentJson(*comp));
+  }
+
+  JSValue sceneCreatePrefab(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    auto *scene = getScene(c);
+    if(!scene)return JS_EXCEPTION;
+    uint32_t uuid{};
+    if(argc < 1 || !readU32(c, argv[0], uuid))return JS_ThrowTypeError(c, "createPrefab expects (uuid, subDir?)");
+    if(!scene->getObjectByUUID(uuid))return JS_ThrowReferenceError(c, "object %u not found", uuid);
+    std::string subDir = (argc > 1 && JS_IsString(argv[1])) ? toString(argv[1], c) : std::string{};
+    uint64_t prefabUUID = scene->createPrefabFromObject(uuid, subDir);
+    if(!prefabUUID)return JS_ThrowInternalError(c, "prefab creation failed");
+    return JS_NewString(c, std::to_string(prefabUUID).c_str());
+  }
+
+  JSValue sceneUnpackPrefab(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    auto *scene = getScene(c);
+    if(!scene)return JS_EXCEPTION;
+    uint32_t uuid{};
+    if(argc < 1 || !readU32(c, argv[0], uuid))return JS_ThrowTypeError(c, "unpackPrefab expects (uuid)");
+    auto obj = scene->getObjectByUUID(uuid);
+    if(!obj)return JS_ThrowReferenceError(c, "object %u not found", uuid);
+    if(!obj->isPrefabInstance())return JS_ThrowTypeError(c, "object %u is not a prefab instance", uuid);
+    scene->unpackPrefabInstance(uuid);
+    return JS_TRUE;
+  }
+
+  //########// project //########//
+
+  JSValue projectConfig(JSContext *c, JSValueConst, int, JSValueConst*)
+  {
+    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
+    return fromJson(c, Json::parse(ctx.project->conf.serialize(), nullptr, false));
+  }
+
+  // Merge-patches project settings: name, romName, sceneIdOnBoot, sceneIdOnReset, debugMenu,
+  // collLayer0..7, visLayer0..7, romHeader, metadata, pathEmu, pathN64Inst
+  JSValue projectSetConfig(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
+    Json patch{};
+    if(argc < 1 || !readJsonArg(c, argv[0], patch) || !patch.is_object()) {
+      return JS_ThrowTypeError(c, "setConfig expects ({...})");
+    }
+    try {
+      for(auto key : {"sceneIdOnBoot", "sceneIdOnReset"}) {
+        if(patch.contains(key) && !findSceneEntry(patch[key].get<int>())) {
+          return JS_ThrowReferenceError(c, "%s: scene %d not found", key, patch[key].get<int>());
+        }
+      }
+      Json conf = Json::parse(ctx.project->conf.serialize(), nullptr, false);
+      if(conf.is_discarded())return JS_ThrowInternalError(c, "could not read project config");
+      conf.merge_patch(patch);
+      ctx.project->deserialize(conf);
+    } catch(const std::exception &ex) {
+      return JS_ThrowTypeError(c, "bad value: %s", ex.what());
+    }
+    ctx.project->markDirty();
+    return fromJson(c, Json::parse(ctx.project->conf.serialize(), nullptr, false));
+  }
+
+  //########// asset settings //########//
+
+  JSValue assetsConfig(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
+    uint64_t uuid{};
+    if(argc < 1 || !readU64(c, argv[0], uuid))return JS_ThrowTypeError(c, "config expects (assetUUID)");
+    auto *e = ctx.project->getAssets().getEntryByUUID(uuid);
+    if(!e)return JS_ThrowReferenceError(c, "asset not found");
+    auto j = assetSummary(*e);
+    j["conf"] = Json::parse(e->conf.serialize(), nullptr, false);
+    return fromJson(c, j);
+  }
+
+  // assets.setConfig(uuid, {format, baseScale, baseScaleOverride, gltfBVH, compression, exclude, autoRun,
+  //   wavForceMono, wavResampleRate, wavCompression, fontId, fontCharset, data})
+  JSValue assetsSetConfig(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
+    uint64_t uuid{};
+    Json p{};
+    if(argc < 2 || !readU64(c, argv[0], uuid) || !readJsonArg(c, argv[1], p) || !p.is_object()) {
+      return JS_ThrowTypeError(c, "setConfig expects (assetUUID, {...})");
+    }
+    auto &assets = ctx.project->getAssets();
+    auto *e = assets.getEntryByUUID(uuid);
+    if(!e)return JS_ThrowReferenceError(c, "asset not found");
+    auto &cf = e->conf;
+    try {
+      if(p.contains("format"))cf.format = p["format"].get<int>();
+      if(p.contains("baseScale"))cf.baseScale = p["baseScale"].get<int>();
+      if(p.contains("baseScaleOverride"))cf.baseScaleOverride = p["baseScaleOverride"].get<int>();
+      if(p.contains("gltfBVH"))cf.gltfBVH = p["gltfBVH"].get<bool>();
+      if(p.contains("compression"))cf.compression = (Project::ComprTypes)p["compression"].get<int>();
+      if(p.contains("exclude"))cf.exclude = p["exclude"].get<bool>();
+      if(p.contains("autoRun"))cf.autoRun = p["autoRun"].get<bool>();
+      if(p.contains("wavForceMono"))cf.wavForceMono.value = p["wavForceMono"].get<bool>();
+      if(p.contains("wavResampleRate"))cf.wavResampleRate.value = p["wavResampleRate"].get<uint32_t>();
+      if(p.contains("wavCompression"))cf.wavCompression.value = p["wavCompression"].get<int32_t>();
+      if(p.contains("fontId"))cf.fontId.value = p["fontId"].get<uint32_t>();
+      if(p.contains("fontCharset"))cf.fontCharset.value = p["fontCharset"].get<std::string>();
+      if(p.contains("data")) {
+        if(!cf.data.is_object())cf.data = Json::object();
+        cf.data.merge_patch(p["data"]);
+      }
+    } catch(const std::exception &ex) {
+      return JS_ThrowTypeError(c, "bad value: %s", ex.what());
+    }
+    assets.markAssetMetaDirty(uuid);
+    auto j = assetSummary(*e);
+    j["conf"] = Json::parse(cf.serialize(), nullptr, false);
+    return fromJson(c, j);
+  }
+
+  JSValue assetsCreateScript(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
+    if(argc < 1 || !JS_IsString(argv[0]))return JS_ThrowTypeError(c, "createScript expects (name, isGlobal?, subDir?)");
+    auto name = toString(argv[0], c);
+    bool isGlobal = argc > 1 ? JS_ToBool(c, argv[1]) : false;
+    std::string subDir = (argc > 2 && JS_IsString(argv[2])) ? toString(argv[2], c) : std::string{};
+    return JS_NewBool(c, ctx.project->getAssets().createScript(name, isGlobal, subDir));
+  }
+
+  JSValue assetsCreateNodeGraph(JSContext *c, JSValueConst, int argc, JSValueConst *argv)
+  {
+    if(!ctx.project)return JS_ThrowReferenceError(c, "no project loaded");
+    if(argc < 1 || !JS_IsString(argv[0]))return JS_ThrowTypeError(c, "createNodeGraph expects (name)");
+    uint64_t uuid = ctx.project->getAssets().createNodeGraph(toString(argv[0], c));
+    if(!uuid)return JS_ThrowInternalError(c, "node graph creation failed");
+    return JS_NewString(c, std::to_string(uuid).c_str());
+  }
+
   const JSCFunctionListEntry SCENE_FUNCS[] = {
     JS_CFUNC_DEF("list", 0, sceneList),
     JS_CFUNC_DEF("current", 0, sceneCurrent),
@@ -498,11 +959,31 @@ namespace
     JS_CFUNC_DEF("setEnabled", 2, sceneSetEnabled),
     JS_CFUNC_DEF("addComponent", 2, sceneAddComponent),
     JS_CFUNC_DEF("removeComponent", 2, sceneRemoveComponent),
+    JS_CFUNC_DEF("newScene", 2, sceneNew),
+    JS_CFUNC_DEF("rename", 2, sceneRename),
+    JS_CFUNC_DEF("duplicate", 2, sceneDuplicate),
+    JS_CFUNC_DEF("deleteScene", 2, sceneDelete),
+    JS_CFUNC_DEF("config", 0, sceneConfig),
+    JS_CFUNC_DEF("setConfig", 1, sceneSetConfig),
+    JS_CFUNC_DEF("setProps", 2, sceneSetProps),
+    JS_CFUNC_DEF("getComponent", 2, sceneGetComponent),
+    JS_CFUNC_DEF("setComponent", 3, sceneSetComponent),
+    JS_CFUNC_DEF("createPrefab", 2, sceneCreatePrefab),
+    JS_CFUNC_DEF("unpackPrefab", 1, sceneUnpackPrefab),
+  };
+
+  const JSCFunctionListEntry PROJECT_FUNCS[] = {
+    JS_CFUNC_DEF("config", 0, projectConfig),
+    JS_CFUNC_DEF("setConfig", 1, projectSetConfig),
   };
 
   const JSCFunctionListEntry ASSET_FUNCS[] = {
     JS_CFUNC_DEF("list", 1, assetsList),
     JS_CFUNC_DEF("get", 1, assetsGet),
+    JS_CFUNC_DEF("config", 1, assetsConfig),
+    JS_CFUNC_DEF("setConfig", 2, assetsSetConfig),
+    JS_CFUNC_DEF("createScript", 3, assetsCreateScript),
+    JS_CFUNC_DEF("createNodeGraph", 1, assetsCreateNodeGraph),
   };
 
   const JSCFunctionListEntry COMPONENT_FUNCS[] = {
@@ -538,6 +1019,7 @@ void Editor::ScriptHost::Impl::initSceneApi(JSContext *c)
   JSValue global = JS_GetGlobalObject(c);
   extendGlobal(c, global, "scene", SCENE_FUNCS, (int)std::size(SCENE_FUNCS));
   extendGlobal(c, global, "assets", ASSET_FUNCS, (int)std::size(ASSET_FUNCS));
+  extendGlobal(c, global, "project", PROJECT_FUNCS, (int)std::size(PROJECT_FUNCS));
   extendGlobal(c, global, "components", COMPONENT_FUNCS, (int)std::size(COMPONENT_FUNCS));
   extendGlobal(c, global, "console", CONSOLE_FUNCS, (int)std::size(CONSOLE_FUNCS));
   extendGlobal(c, global, "editor", EDITOR_FUNCS, (int)std::size(EDITOR_FUNCS));

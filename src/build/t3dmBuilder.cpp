@@ -187,8 +187,18 @@ bool Build::buildT3DCollision(
   };
   entry.conf.uuid = newUUID;
 
-  printf("Building T3DM Collision: %s\n", outPath.string().c_str());
-  //printf(" asset: %d | %d\n", sceneCtx.files.size(), sceneCtx.assetUUIDToIdx.size());
+  sceneCtx.collisionFiles.insert(fileName);
+  // register as a ROM filesystem input, so a changed collision file triggers a DFS repack
+  sceneCtx.files.push_back("filesystem/" + fileName);
+
+  // The file name is a hash of the model UUID and the selected meshes, and the
+  // collision data depends only on the GLB, so an output newer than the GLB is up to date.
+  if(fs::exists(outPath) && Utils::FS::getFileAge(model->path) < Utils::FS::getFileAge(outPath)) {
+    sceneCtx.addAsset(entry);
+    return true;
+  }
+
+  Utils::Logger::log("Building collision: " + model->name + " -> " + fileName);
 
   auto collData = Build::buildCollision(model->path, meshes);
   collData.writeToFile(outPath.string());

@@ -95,10 +95,14 @@ bool Utils::Proc::runSyncLogged(const std::string&cmd) {
   if(!pipe)return "";
 
   char buffer[BUFF_SIZE];
+  bool lineStart = true;
   while(!feof(pipe))
   {
     if(fgets(buffer, BUFF_SIZE, pipe) != nullptr) {
-      Logger::logRaw(buffer);
+      std::string line = buffer;
+      if(lineStart)line = Logger::timestamp() + line;
+      lineStart = !line.empty() && line.back() == '\n';
+      Logger::logRaw(line);
     }
   }
   return pclose(pipe) == 0;

@@ -6,6 +6,9 @@
 
 #include <atomic>
 #include <mutex>
+#include <chrono>
+#include <ctime>
+#include <cstdio>
 
 namespace
 {
@@ -18,12 +21,30 @@ namespace
   std::string logStripped{};
 }
 
+std::string Utils::Logger::timestamp()
+{
+  using namespace std::chrono;
+  auto now = system_clock::now();
+  auto t = system_clock::to_time_t(now);
+  auto ms = (int)(duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000);
+  std::tm tmLocal{};
+  #if defined(_WIN32)
+    localtime_s(&tmLocal, &t);
+  #else
+    localtime_r(&t, &tmLocal);
+  #endif
+  char res[32];
+  snprintf(res, sizeof(res), "%02d:%02d:%02d.%03d ", tmLocal.tm_hour, tmLocal.tm_min, tmLocal.tm_sec, ms);
+  return res;
+}
+
 void Utils::Logger::setOutput(LogOutputFunc outFunc) {
   outputFunc = outFunc;
 }
 
 void Utils::Logger::log(const std::string&msg, int level)
 {
+  auto ts = timestamp();
   std::lock_guard lock{mtx};
   switch(level) {
     default:
@@ -37,7 +58,7 @@ void Utils::Logger::log(const std::string&msg, int level)
       buff += "[ERR] ";
       break;
   }
-  buff += msg + "\n";
+  buff += ts + msg + "\n";
   logChanged = true;
 
   if (outputFunc) {

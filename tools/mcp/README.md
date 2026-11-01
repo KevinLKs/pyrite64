@@ -55,6 +55,12 @@ Only one editor can own the port. A second editor instance logs a warning and ru
 | `pyrite_add_object` / `pyrite_add_model` / `pyrite_add_prefab` | Create objects |
 | `pyrite_set_transform` / `pyrite_reparent` / `pyrite_delete_objects` | Edit objects |
 | `pyrite_add_component` / `pyrite_select` | Components, editor selection |
+| `pyrite_create_scene` / `pyrite_rename_scene` / `pyrite_duplicate_scene` / `pyrite_delete_scene` | Scene management |
+| `pyrite_scene_settings` / `pyrite_project_settings` | Read or change scene and project settings (boot scene, layers, ROM header...) |
+| `pyrite_get_component` / `pyrite_set_component` / `pyrite_remove_component` | Read and change component settings |
+| `pyrite_set_object_props` | Name, enabled, selectable, visibility mask |
+| `pyrite_create_prefab` / `pyrite_unpack_prefab` | Prefabs |
+| `pyrite_asset_settings` / `pyrite_create_script` / `pyrite_create_node_graph` | Asset import settings, new scripts and node graphs |
 | `pyrite_load_scene` / `pyrite_save` / `pyrite_build` / `pyrite_get_log` / `pyrite_undo` | Project actions |
 | `pyrite_run_js` | Run any editor script, for batch or procedural work the other tools don't cover |
 
@@ -64,4 +70,7 @@ The JavaScript API available to `pyrite_run_js` and to editor scripts is listed 
 
 * Scripts run on the editor's main thread. A script with an endless loop freezes the editor.
 * Requests time out after 30 seconds if the editor is busy (for example a modal dialog is open).
-* Component settings can be read with `pyrite_get_object`, but there is no setter per component field yet. To change them, read the object JSON, edit it, and recreate the object with `scene.addJSON`.
+* Settings patches (`setConfig`, `setComponent`) use JSON merge-patch: nested objects merge, arrays are replaced whole, `null` deletes a key.
+* Components on a prefab instance live in the prefab. Edit the prefab, or unpack the instance first.
+* Creating, loading, duplicating and deleting scenes clears the undo history, the same as doing it in the editor. Deleting a scene can't be undone.
+* Changing a model's import settings marks the asset dirty. Save, then build or use Rescan All Assets to see the result.

@@ -8,6 +8,9 @@
 #include <thread>
 #include <chrono>
 #include <algorithm>
+#include <unordered_set>
+#include <cctype>
+#include <cstdio>
 #include "../utils/fs.h"
 #include "../utils/logger.h"
 #include "../utils/proc.h"
@@ -75,6 +78,18 @@ bool Build::buildProject(const std::string &configPath)
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - timeLoad).count();
     Utils::Logger::log("Project loaded (" + std::to_string(ms) + " ms)");
   }
+
+  // Build step timing (Poke64 fork): "[time] <step>: <step ms> (total <s>)"
+  auto timeStep = std::chrono::steady_clock::now();
+  auto logStep = [&](const std::string &stepName) {
+    auto now = std::chrono::steady_clock::now();
+    auto msStep = std::chrono::duration_cast<std::chrono::milliseconds>(now - timeStep).count();
+    auto msTotal = std::chrono::duration_cast<std::chrono::milliseconds>(now - timeLoad).count();
+    char totalStr[32];
+    snprintf(totalStr, sizeof(totalStr), "%.1f", msTotal / 1000.0);
+    Utils::Logger::log("[time] " + stepName + ": " + std::to_string(msStep) + " ms (total " + totalStr + " s)");
+    timeStep = now;
+  };
 
   // To build, all relevant project documents have to be at the current format.
   // Converting them rewrites project files, which only happens with the user's consent when the project is opened in the editor.
@@ -171,6 +186,8 @@ bool Build::buildProject(const std::string &configPath)
     }
   }
 
+  logStep("migration check + asset table");
+
   // User scripts
   auto userDirs = Utils::FS::scanDirs(path + "/src/user");
   std::string userCodeRules = "";
@@ -186,6 +203,8 @@ bool Build::buildProject(const std::string &configPath)
   // Scripts
   buildGlobalScripts(project, sceneCtx);
   buildScripts(project, sceneCtx);
+
+  logStep("node graphs + scripts");
 
   // Scenes
   project.getScenes().reload();
@@ -208,6 +227,8 @@ bool Build::buildProject(const std::string &configPath)
     }
   }
 
+  logStep("scenes (incl. collision)");
+
   auto sceneTableHeader = Utils::replaceAll(Utils::FS::loadTextFile("data/scripts/sceneTable.h"), {
     {"{{SCENE_MAP}}", sceneMapStr},
     {"{{SCENE_COUNT}}", std::to_string(scenes.size())}
@@ -229,6 +250,29 @@ bool Build::buildProject(const std::string &configPath)
       Utils::Logger::log(std::string(builder.name) + " Asset build failed!", Utils::Logger::LEVEL_ERROR);
       return false;
     }
+    logStep(std::string(builder.name) + " assets");
+  }
+
+  // Delete collision files no scene uses anymore (Pyrite names them by hash, so an old
+  // one is left behind whenever a model or mesh filter changes, and mkdfs packs the whole
+  // filesystem/ folder into the ROM). Only 16-hex-digit names in the filesystem root count.
+  {
+    std::unordered_set<std::string> keep = sceneCtx.collisionFiles;
+    for(auto &f : sceneCtx.files)keep.insert(fs::path{f}.filename().string());
+
+    bool removedAny = false;
+    std::error_code ec{};
+    for(const auto &entry : fs::directory_iterator{fsPath, ec}) {
+      if(!entry.is_regular_file())continue;
+      auto name = entry.path().filename().string();
+      bool isHex = name.size() == 16 && std::all_of(name.begin(), name.end(), [](char c){ return std::isxdigit((unsigned char)c); });
+      if(!isHex || keep.contains(name))continue;
+      Utils::Logger::log("Removing unused collision file: " + name);
+      fs::remove(entry.path(), ec);
+      removedAny = true;
+    }
+    // the stale file may already be packed, force one repack
+    if(removedAny)fs::remove(fs::path{path} / "build" / (project.conf.romName + ".dfs"), ec);
   }
 
   auto assetTableCode = Utils::replaceAll(
@@ -251,7 +295,7 @@ bool Build::buildProject(const std::string &configPath)
   for (auto &entry : sceneCtx.assetList) {
     fileList.writeChars(entry.path.c_str(), entry.path.size()+1);
   }
-  fileList.writeToFile(fsDataPath / "a");
+  fileList.writeToFileIfChanged(fsDataPath / "a");
 
   // kep order stable to detect makefile changes
   auto filesSorted = sceneCtx.files;
@@ -273,7 +317,7 @@ bool Build::buildProject(const std::string &configPath)
   );
 
   auto mkPath = fs::absolute(path) / "Makefile";
-  Utils::FS::saveTextFile(mkPath, makefile);
+  Utils::FS::saveTextFileIfChanged(mkPath, makefile);
 
   {
     Utils::BinaryFile f{};
@@ -283,11 +327,14 @@ bool Build::buildProject(const std::string &configPath)
       auto uuid = sceneCtx.autoLoadFontUUIDs[i];
       f.write<uint16_t>(uuid == 0 ? 0xFFFF : sceneCtx.assetUUIDToIdx[uuid]);
     }
-    f.writeToFile(fsDataPath / "conf");
+    f.writeToFileIfChanged(fsDataPath / "conf");
   }
+
+  logStep("tables + makefile");
 
   // Build
   bool success = sceneCtx.toolchain.runCmdSyncLogged("make -C \"" + path + "\" -j8");
+  logStep("make (compile, link, DFS, ROM)");
 
   if(success) {
     Utils::Logger::log("Build done!");

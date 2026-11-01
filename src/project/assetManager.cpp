@@ -9,6 +9,8 @@
 #include <format>
 #include <chrono>
 #include <unordered_set>
+#include <fstream>
+#include <cstring>
 
 #include "SHA256.h"
 #include "../build/autoScale.h"
@@ -432,7 +434,66 @@ void Project::AssetManager::startWatcher()
   }
 }
 
+namespace
+{
+  // Material names straight from the glTF JSON (the GLB's first chunk, or a .gltf file),
+  // without reading buffers, meshes or animations.
+  std::vector<std::string> readGltfMaterialNames(const std::string &path)
+  {
+    std::vector<std::string> res{};
+    std::ifstream f(path, std::ios::binary);
+    if(!f)return res;
+
+    char header[20]{};
+    f.read(header, sizeof(header));
+    std::string jsonStr{};
+    if(f.gcount() == 20 && memcmp(header, "glTF", 4) == 0) {
+      uint32_t jsonLen{}, chunkType{};
+      memcpy(&jsonLen, header + 12, 4);
+      memcpy(&chunkType, header + 16, 4);
+      if(chunkType != 0x4E4F534A || jsonLen > 64u * 1024u * 1024u)return res; // "JSON"
+      jsonStr.resize(jsonLen);
+      f.read(jsonStr.data(), jsonLen);
+      if((uint32_t)f.gcount() != jsonLen)return res;
+    } else {
+      jsonStr = Utils::FS::loadTextFile(path);
+    }
+
+    auto doc = nlohmann::json::parse(jsonStr, nullptr, false);
+    if(doc.is_discarded() || !doc.contains("materials") || !doc["materials"].is_array())return res;
+    for(const auto &mat : doc["materials"]) {
+      if(mat.contains("name") && mat["name"].is_string())res.push_back(mat["name"].get<std::string>());
+    }
+    return res;
+  }
+}
+
+const Project::Assets::Model3D& Project::AssetManager::getModelMaterialsOnly(uint64_t uuid)
+{
+  static const Assets::Model3D emptyModel{};
+  auto it = entriesMap.find(uuid);
+  if(it == entriesMap.end())return emptyModel;
+  auto &entry = entries[it->second.first][it->second.second];
+  if(entry.type != FileType::MODEL_3D)return emptyModel;
+  if(entry.loaded)return entry.model;
+
+  auto cached = materialOnlyCache.find(uuid);
+  if(cached != materialOnlyCache.end())return cached->second;
+
+  auto &res = materialOnlyCache[uuid];
+  if(entry.conf.data.is_object() && entry.conf.data.contains("materials")) {
+    const auto &savedMats = entry.conf.data["materials"];
+    for(const auto &name : readGltfMaterialNames(entry.path)) {
+      // materials without a saved entry never carry a placeholder (Material::fromT3D)
+      if(!savedMats.contains(name))continue;
+      res.materials[name].deserialize(savedMats[name]);
+    }
+  }
+  return res;
+}
+
 void Project::AssetManager::reload() {
+  materialOnlyCache.clear();
   for (auto &e : entries)e.clear();
   entriesMap.clear();
   pathIndex.clear();
@@ -541,6 +602,7 @@ float Project::AssetManager::getModelScale(uint64_t uuid)
 bool Project::AssetManager::applyChanges(const std::vector<std::string> &upserts, const std::vector<std::string> &removes)
 {
   if (upserts.empty() && removes.empty())return false;
+  materialOnlyCache.clear();
 
   auto codeKey = pathKey(getCodePath(project).string()) + "/";
 

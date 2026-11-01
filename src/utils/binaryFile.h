@@ -209,6 +209,23 @@ namespace Utils
         fclose(file);
       }
 
+      // Only writes if the bytes differ, so the timestamp stays stable and make
+      // doesn't repack the ROM filesystem for unchanged files. Returns true if written.
+      bool writeToFileIfChanged(const fs::path &filename) {
+        std::error_code ec{};
+        if(fs::exists(filename, ec) && fs::file_size(filename, ec) == dataSize) {
+          FILE* file = fopen(filename.string().c_str(), "rb");
+          if(file) {
+            std::vector<uint8_t> cur(dataSize);
+            size_t read = dataSize ? fread(cur.data(), 1, dataSize, file) : 0;
+            fclose(file);
+            if(read == dataSize && std::equal(cur.begin(), cur.end(), data.begin()))return false;
+          }
+        }
+        writeToFile(filename);
+        return true;
+      }
+
       std::vector<uint8_t> &getData() {
         data.resize(dataSize);
         return data;

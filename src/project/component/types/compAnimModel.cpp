@@ -95,8 +95,9 @@ namespace Project::Component::AnimModel
     ctx.fileObj.write<uint8_t>(0); // padding
     ctx.fileObj.write<uint32_t>(layerRef);
 
+    // Fork: materials only, so a build doesn't parse every prefab's GLB (meshes + animations)
     data.material.validateWithModel(
-      ctx.project->getAssets().getEntryByUUID(data.model.value)->model
+      ctx.project->getAssets().getModelMaterialsOnly(data.model.value)
     );
     data.material.build(ctx.fileObj, ctx, obj);
   }

@@ -86,9 +86,10 @@ namespace Project
       AssetManager assets{this};
       SceneManager scenes{this};
 
+    public:
+      // Applies a full config document (same format as conf.serialize()).
       void deserialize(const nlohmann::json &doc);
 
-    public:
       ProjectConf conf{};
 
       // editorMode: models load on first use and asset files are watched for changes.
@@ -107,4 +108,4 @@ namespace Project
       [[nodiscard]] const std::string &getConfigPath() const { return pathConfig; }
       [[nodiscard]] bool wasSavedWithNewerVersion() const { return openedFromNewerVersion; }
   };
-}
+}

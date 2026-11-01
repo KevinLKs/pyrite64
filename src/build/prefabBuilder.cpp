@@ -36,7 +36,7 @@ bool Build::buildPrefabAssets(Project::Project &project, SceneCtx &sceneCtx)
     sceneCtx.fileObj.write<uint32_t>(0); // object count, patched below
     uint32_t count = writeObject(sceneCtx, asset.prefab->obj, false, 0, 0, true, {}, true);
     sceneCtx.fileObj.atPos(0, [&]{ sceneCtx.fileObj.write<uint32_t>(count); });
-    sceneCtx.fileObj.writeToFile(outPath);
+    sceneCtx.fileObj.writeToFileIfChanged(outPath);
     sceneCtx.fileObj = {};
   }
 

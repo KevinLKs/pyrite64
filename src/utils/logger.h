@@ -20,6 +20,9 @@ namespace Utils::Logger
   void logRaw(const std::string &msg, int level = LEVEL_INFO);
   void clear();
 
+  // Wall-clock "HH:MM:SS.mmm ", prefixed to every log line (Poke64 fork, build timing).
+  std::string timestamp();
+
   std::string getLog();
   const std::string& getLogStripped();
 }

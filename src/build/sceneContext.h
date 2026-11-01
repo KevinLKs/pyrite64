@@ -4,6 +4,8 @@
 */
 #pragma once
 #include <vector>
+#include <string>
+#include <unordered_set>
 
 #include "stringTable.h"
 #include "../utils/binaryFile.h"
@@ -45,6 +47,9 @@ namespace Build
     uint32_t nextRuntimeId{1};
 
     bool needsOpus{false};
+
+    // file names (in filesystem/) of collision meshes used by this build, for stale-file cleanup
+    std::unordered_set<std::string> collisionFiles{};
 
     void addAsset(const Project::AssetManagerEntry &entry);
   };

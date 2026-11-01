@@ -108,6 +108,9 @@ namespace Project
 
       void deserialize(const std::string &data);
 
+      // Reads only the scene settings ("conf" block), objects are left untouched.
+      void deserializeConf(nlohmann::json &docConf);
+
       // Assigns the runtime object ids (uint16_t) for the whole tree.
       // Build-time only: must be called before serializing objects to the runtime format.
       // Returns the first free id (base for build-time expanded prefab-instance children).
