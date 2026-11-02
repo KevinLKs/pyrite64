@@ -338,6 +338,8 @@ add_executable(pyrite64 src/main.cpp
         src/n64/ccMapping.cpp
         src/editor/pages/parts/assets/textureEditor.h
         src/editor/pages/parts/assets/textureEditor.cpp
+        src/editor/pages/parts/assets/assetPicker.h
+        src/editor/pages/parts/assets/assetPicker.cpp
         src/editor/pages/parts/assets/matInstanceEditor.h
         src/editor/pages/parts/assets/matInstanceEditor.cpp
         src/renderer/storageBuffer.cpp

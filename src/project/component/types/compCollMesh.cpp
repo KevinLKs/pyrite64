@@ -18,6 +18,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include "../../../build/projectBuilder.h"
 #include "../shared/meshFilter.h"
+#include "../../../editor/pages/parts/assets/assetPicker.h"
 #include "glm/gtx/matrix_decompose.hpp"
 
 namespace Project::Component::CollMesh
@@ -119,39 +120,20 @@ namespace Project::Component::CollMesh
     Data &data = *static_cast<Data*>(entry.data.get());
 
     auto &assets = ctx.project->getAssets();
-    auto &modelList = assets.getTypeEntries(FileType::MODEL_3D);
 
     if (ImTable::start("Comp", &obj)) {
       ImTable::add("Name", entry.name);
       ImTable::addMultiSelectMask8("Reacts to", data.maskRead.resolve(obj), ctx.project->conf.collLayerNames, "<Nothing>");
       ImTable::addMultiSelectMask8("Is Affecting", data.maskWrite.resolve(obj), ctx.project->conf.collLayerNames, "<Nothing>");
       ImTable::add("Model");
-      //ImGui::InputScalar("##UUID", ImGuiDataType_U64, &data.scriptUUID);
-
-      int idx = modelList.size();
-      for (int i=0; i<(int)modelList.size(); ++i) {
-        if (modelList[i].getUUID() == data.modelUUID.resolve(obj.propOverrides)) {
-          idx = i;
-          break;
-        }
-      }
-
-      auto getter = [](void*, int idx) -> const char*
-      {
-        auto &scriptList = ctx.project->getAssets().getTypeEntries(FileType::MODEL_3D);
-        if (idx < 0 || idx >= (int)scriptList.size())return "<Select Model>";
-        return scriptList[idx].name.c_str();
-      };
-
-      if (ImGui::Combo("##UUID", &idx, getter, nullptr, modelList.size()+1)) {
+      auto &modelUUID = data.modelUUID.resolve(obj.propOverrides);
+      if(Editor::AssetPicker::draw("Model", modelUUID, FileType::MODEL_3D)) {
         data.obj3D.removeMesh();
       }
 
-      const AssetManagerEntry* selModel = nullptr;
-      if (idx < (int)modelList.size()) {
-        selModel = &modelList[idx];
-        data.modelUUID.value = selModel->getUUID();
-      }
+      // getEntryByUUID also loads the model if it was deferred
+      const AssetManagerEntry* selModel = assets.getEntryByUUID(modelUUID);
+      if(selModel && selModel->type != FileType::MODEL_3D)selModel = nullptr;
 
       ImTable::end();
 

@@ -19,6 +19,7 @@
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include "../../../editor/pages/parts/assets/matInstanceEditor.h"
+#include "../../../editor/pages/parts/assets/assetPicker.h"
 #include "glm/gtx/matrix_decompose.hpp"
 
 #include "../shared/meshFilter.h"
@@ -123,15 +124,14 @@ namespace Project::Component::Model
   {
     Data &data = *static_cast<Data*>(entry.data.get());
 
-    auto &assets = ctx.project->getAssets();
-    auto &modelList = assets.getTypeEntries(FileType::MODEL_3D);
     auto scene = ctx.project->getScenes().getLoadedScene();
 
     if (ImTable::start("Comp", &obj)) {
       ImTable::add("Name", entry.name);
-      ImTable::addAssetVecComboBox("Model", modelList, data.model.value, [&data](auto) {
+      ImTable::add("Model");
+      if(Editor::AssetPicker::draw("Model", data.model.value, FileType::MODEL_3D)) {
         data.obj3D.removeMesh();
-      });
+      }
 
       ImTable::add("");
       if(ImGui::Button(ICON_MDI_PENCIL " Open Model Editor")) {
