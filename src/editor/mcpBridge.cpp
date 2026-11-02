@@ -88,7 +88,14 @@ namespace
     job->code = req.value("code", "");
     auto future = job->result.get_future();
     {
+      // checked under the lock, so a job can't slip in after stop() failed the queue
+      // (it would then wait the full timeout and stall join())
       std::lock_guard lock{jobMutex};
+      if(!running) {
+        res["ok"] = false;
+        res["result"] = "editor is shutting down";
+        return res.dump() + "\n";
+      }
       jobs.push_back(job);
     }
 
@@ -136,8 +143,8 @@ namespace
       if(s == INVALID_SOCK)continue; // stop() closes the listen socket to break out
       clientSock = s;
       serveClient(s);
-      clientSock = INVALID_SOCK;
-      closeSock(s);
+      // stop() may already have taken and closed it
+      if(clientSock.exchange(INVALID_SOCK) == s)closeSock(s);
     }
   }
 }
@@ -202,13 +209,17 @@ namespace Editor::McpBridge
       #endif
       closeSock(ls);
     }
-    SocketT cs = clientSock.load();
+    // Close the client socket too: on Windows shutdown() alone does not wake a
+    // blocked recv(), so join() below would hang while an MCP client is connected.
+    // Whoever takes the handle out of clientSock closes it (no double close).
+    SocketT cs = clientSock.exchange(INVALID_SOCK);
     if(cs != INVALID_SOCK) {
       #ifdef _WIN32
         ::shutdown(cs, SD_BOTH);
       #else
         ::shutdown(cs, SHUT_RDWR);
       #endif
+      closeSock(cs);
     }
 
     // fail pending jobs so the network thread isn't left waiting

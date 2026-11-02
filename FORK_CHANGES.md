@@ -133,6 +133,26 @@ Pyrite copies `n64/engine/` into a project's `engine/` folder on every build, so
 
 Same rule as section 7: re-apply on an upstream merge if `animModel.h` changed upstream.
 
+## 9. Model picker (2026-11-02)
+
+The Model field in the Model, Animated Model and Collision Mesh components now opens the same folder browser as the texture picker (section 4), with turntable thumbnails, instead of one flat list of every `.glb`.
+
+| File | Change | Why |
+| --- | --- | --- |
+| `src/editor/pages/parts/assets/assetPicker.h`, `.cpp` (new) | The picker from section 4 moved here as `AssetPicker::draw(label, uuid, fileType, startDir)`. It draws image previews for textures and `ThumbnailCache` turntables for models (hover to spin, cube icon while one is still rendering). | One picker for both asset types. |
+| `assetPicker.cpp` | Opens in `startDir` if given, else the selected asset's folder, else the folder last picked from for that asset type, else `assets/`. Textures and models each remember their own last folder. | Lands near the model you are likely to want. |
+| `src/editor/pages/parts/assets/textureEditor.cpp` | `drawTexturePicker()` now just calls `AssetPicker::draw()`. | Texture behavior is unchanged. |
+| `src/project/component/types/compModel.cpp`, `compAnimModel.cpp` | Use the picker instead of `addAssetVecComboBox`. | Drag-and-drop from the asset browser and undo still work. |
+| `src/project/component/types/compCollMesh.cpp` | Uses the picker instead of a plain `ImGui::Combo`, writes through the prop override, and gets the model with `getEntryByUUID()`. | Collision Mesh gains drag-and-drop and undo, respects prefab overrides, and loads a deferred model before reading its meshes. |
+| `CMakeLists.txt` | Adds the two new files. | Needed to compile them. |
+
+## 10. MCP bridge: clean shutdown (2026-11-02)
+
+| File | Change | Why |
+| --- | --- | --- |
+| `src/editor/mcpBridge.cpp` | `stop()` now closes the connected client's socket instead of only calling `shutdown()` on it. Whichever side takes the handle out of `clientSock` closes it. | On Windows `shutdown()` does not wake a blocked `recv()`, so closing the editor with an MCP client connected hung in `join()` until Windows killed it ("Application Hang"). |
+| `src/editor/mcpBridge.cpp` | A request arriving during shutdown is refused right away, checked under the job lock. | Such a job could miss the shutdown cleanup and hold up closing for the full 30 s timeout. |
+
 ## Known limits, compatibility and how to verify
 
 Project files written by this fork are the same format as upstream's, so a project can move between the two editors. The fork does not change the scene or prefab format, file migration, or the N64 engine.
@@ -157,6 +177,8 @@ Project files written by this fork are the same format as upstream's, so a proje
 - [ ] Rescan All Assets works, and is disabled while there are unsaved asset changes.
 - [ ] Texture picker: opens in the model's folder, picking a texture updates the preview, Ctrl+Z undoes it.
 - [ ] Picker up arrow, breadcrumbs, search and drag-and-drop from the asset browser all work.
+- [ ] Model picker (Model, Animated Model, Collision Mesh): opens in the model's folder, thumbnails spin on hover, Ctrl+Z undoes a change.
+- [ ] Close the editor while an MCP client is connected: it exits right away.
 - [ ] Build with nothing changed: logging starts immediately, "Project loaded" takes a few seconds at most, and the summary reads "0 converted".
 - [ ] Edit one `.glb` and build: only that model converts.
 - [ ] The ROM runs with models at the same scale as an upstream build.
