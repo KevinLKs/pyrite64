@@ -275,6 +275,19 @@ bool Build::buildProject(const std::string &configPath)
     if(removedAny)fs::remove(fs::path{path} / "build" / (project.conf.romName + ".dfs"), ec);
   }
 
+  // Input map (Project > Settings > Input), read at runtime by P64::Input
+  {
+    auto inputErr = Project::InputMap::validate(project.conf.input);
+    if(!inputErr.empty()) {
+      auto msg = "Input map: " + inputErr + "\nFix it in Project > Settings > Input.";
+      Utils::Logger::log(msg, Utils::Logger::LEVEL_ERROR);
+      Editor::Noti::add(Editor::Noti::Type::ERROR, msg);
+      return false;
+    }
+    Utils::FS::saveTextFileIfChanged(project.getPath() + "/src/p64/inputMap.h", Project::InputMap::generateHeader(project.conf.input));
+    Utils::FS::saveTextFileIfChanged(project.getPath() + "/src/p64/inputMap.cpp", Project::InputMap::generateSource(project.conf.input));
+  }
+
   auto assetTableCode = Utils::replaceAll(
     Utils::FS::loadTextFile("data/scripts/assetTable.h"),
     "{{ASSET_MAP}}", sceneCtx.assetFileMap

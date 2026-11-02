@@ -5,6 +5,7 @@
 #include "projectSettings.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include "imgui.h"
 #include "../../../context.h"
@@ -182,6 +183,178 @@ namespace
     }
     return false;
   }
+  // Short text for the bindings of one action, e.g. "A, Stick Up"
+  std::string bindSummary(const InputMap::Action &a)
+  {
+    std::string res{};
+    auto addPart = [&](const char* txt) { if(!res.empty())res += ", "; res += txt; };
+    if(a.type == InputMap::Type::STICK) {
+      if(a.binds & InputMap::BIND_STICK)addPart("Analog Stick");
+      if(a.binds & InputMap::BIND_DPAD)addPart("D-Pad");
+      if(a.binds & InputMap::BIND_CBTN)addPart("C-Buttons");
+    } else {
+      for(size_t i = 0; i < InputMap::BINDS.size(); ++i) {
+        if(a.binds & InputMap::bit((int)i))addPart(InputMap::BINDS[i].label);
+      }
+    }
+    return res.empty() ? "(nothing bound)" : res;
+  }
+
+  // Checkbox that sets/clears all bits of `mask` together
+  void maskCheckBox(const char* label, uint32_t &binds, uint32_t mask)
+  {
+    bool on = (binds & mask) != 0;
+    if(ImGui::Checkbox(label, &on)) {
+      binds = on ? (binds | mask) : (binds & ~mask);
+    }
+  }
+
+  // Graph of stick distance (x) to output strength (y) for a STICK action
+  void drawStickCurve(const InputMap::Action &a)
+  {
+    constexpr int SAMPLES = 64;
+    float vals[SAMPLES];
+    for(int i = 0; i < SAMPLES; ++i) {
+      float dist = 90.0f * (float)i / (float)(SAMPLES - 1); // N64 stick max is about 85-90
+      float mag = 0.0f;
+      if(dist > (float)a.deadzone) {
+        mag = a.range > a.deadzone ? (dist - (float)a.deadzone) / (float)(a.range - a.deadzone) : 1.0f;
+        mag = std::min(mag, 1.0f);
+        if(a.curve != 1.0f)mag = powf(mag, a.curve);
+      }
+      vals[i] = mag;
+    }
+    ImGui::PlotLines("##curve", vals, SAMPLES, 0, nullptr, 0.0f, 1.0f, ImVec2(-FLT_MIN, 60_px));
+    ImGui::TextDisabled("Stick distance (0 to 90) left to right, strength (0 to 1) bottom to top");
+  }
+
+  void drawInputAction(InputMap::Action &a, int idx, bool &remove)
+  {
+    ImGui::PushID(idx);
+    auto nameErr = InputMap::validateName(a.name);
+    std::string header = (nameErr.empty() ? "" : ICON_MDI_ALERT " ")
+      + std::string(a.type == InputMap::Type::STICK ? ICON_MDI_GAMEPAD_ROUND_OUTLINE " " : ICON_MDI_GAMEPAD_CIRCLE_OUTLINE " ")
+      + a.name + "  -  " + bindSummary(a) + "###action";
+
+    bool open = ImGui::TreeNodeEx(header.c_str(), ImGuiTreeNodeFlags_SpanAvailWidth);
+    if(open)
+    {
+      ImTable::start("Action");
+
+      ImTable::add("Name");
+      ImGui::InputText("##name", &a.name);
+      if(!nameErr.empty()) {
+        ImGui::TextColored({1.0f, 0.3f, 0.3f, 1.0f}, ICON_MDI_ALERT " %s", nameErr.c_str());
+      }
+      ImTable::add("Code");
+      ImGui::TextDisabled("Action::%s", a.name.c_str());
+
+      int type = (int)a.type;
+      if(ImTable::addComboBox("Type", type, {"Button", "Stick"})) {
+        if((InputMap::Type)type != a.type) {
+          a.type = (InputMap::Type)type;
+          a.binds = a.type == InputMap::Type::STICK ? InputMap::BIND_STICK : 0;
+        }
+      }
+
+      if(a.type == InputMap::Type::BUTTON)
+      {
+        // rows: face + shoulder buttons, D-pad, C-buttons, stick directions
+        constexpr int ROWS[4][6] = {
+          {0, 1, 2, 3, 4, 5}, {6, 7, 8, 9, -1, -1}, {10, 11, 12, 13, -1, -1}, {14, 15, 16, 17, -1, -1},
+        };
+        constexpr const char* ROW_LABELS[4] = {"Buttons", "D-Pad", "C-Buttons", "Stick"};
+        for(int row = 0; row < 4; ++row) {
+          ImTable::add(ROW_LABELS[row]);
+          for(int col = 0; col < 6; ++col) {
+            int i = ROWS[row][col];
+            if(i < 0)break;
+            if(col != 0)ImGui::SameLine();
+            bool on = (a.binds & InputMap::bit(i)) != 0;
+            if(ImGui::Checkbox(InputMap::BINDS[i].label, &on)) {
+              a.binds = on ? (a.binds | InputMap::bit(i)) : (a.binds & ~InputMap::bit(i));
+            }
+          }
+        }
+        if(a.binds & InputMap::BIND_STICK) {
+          ImTable::add("Stick Threshold");
+          ImGui::SliderInt("##thr", &a.threshold, 1, 90);
+          ImGui::TextDisabled("How far (raw units, edge is about 85) the stick must be pushed to count");
+        }
+      } else {
+        ImTable::add("Sources");
+        maskCheckBox("Analog Stick", a.binds, InputMap::BIND_STICK);
+        ImGui::SameLine();
+        maskCheckBox("D-Pad", a.binds, InputMap::BIND_DPAD);
+        ImGui::SameLine();
+        maskCheckBox("C-Buttons", a.binds, InputMap::BIND_CBTN);
+
+        if(a.binds & InputMap::BIND_STICK) {
+          ImTable::add("Deadzone");
+          ImGui::SliderInt("##dz", &a.deadzone, 0, 40);
+          ImTable::add("Full At");
+          ImGui::SliderInt("##range", &a.range, std::max(a.deadzone + 1, 20), 127);
+          ImTable::add("Curve");
+          ImGui::SliderFloat("##curve", &a.curve, 0.5f, 3.0f, "%.2f");
+          ImTable::add("");
+          drawStickCurve(a);
+        }
+      }
+
+      ImTable::add("");
+      if(ImGui::Button(ICON_MDI_DELETE " Remove Action"))remove = true;
+
+      ImTable::end();
+      ImGui::TreePop();
+    }
+    ImGui::PopID();
+  }
+
+  void drawInput()
+  {
+    auto &conf = ctx.project->conf.input;
+    ImGui::TextWrapped(ICON_MDI_INFORMATION_OUTLINE
+      " Name your controls here, then read them in code with Input::held(Action::name),"
+      " Input::pressed(...) and Input::stick(...), or with the Input nodes in node graphs."
+      " Include \"p64/inputMap.h\" in scripts. Actions update on the next build.");
+
+    auto err = InputMap::validate(conf);
+    if(!err.empty()) {
+      ImGui::TextColored({1.0f, 0.3f, 0.3f, 1.0f}, ICON_MDI_ALERT " %s", err.c_str());
+    }
+
+    int removeIdx = -1;
+    for(size_t i = 0; i < conf.actions.size(); ++i) {
+      bool remove = false;
+      drawInputAction(conf.actions[i], (int)i, remove);
+      if(remove)removeIdx = (int)i;
+    }
+    if(removeIdx >= 0)conf.actions.erase(conf.actions.begin() + removeIdx);
+
+    bool full = conf.actions.size() >= InputMap::MAX_ACTIONS;
+    if(full)ImGui::BeginDisabled();
+    if(ImGui::Button(ICON_MDI_PLUS " Button Action")) {
+      InputMap::Action a{};
+      a.name = InputMap::makeName("action", conf);
+      conf.actions.push_back(a);
+    }
+    ImGui::SameLine();
+    if(ImGui::Button(ICON_MDI_PLUS " Stick Action")) {
+      InputMap::Action a{};
+      a.name = InputMap::makeName("stick", conf);
+      a.type = InputMap::Type::STICK;
+      a.binds = InputMap::BIND_STICK;
+      conf.actions.push_back(a);
+    }
+    if(full)ImGui::EndDisabled();
+
+    if(conf.actions.empty()) {
+      ImGui::SameLine();
+      if(ImGui::Button(ICON_MDI_GAMEPAD_VARIANT_OUTLINE " Add Common Actions")) {
+        conf.actions = InputMap::defaultActions();
+      }
+    }
+  }
 }
 
 bool Editor::ProjectSettings::draw()
@@ -224,6 +397,10 @@ bool Editor::ProjectSettings::draw()
       ImGui::InputText(("##vis" + std::to_string(i)).c_str(), &ctx.project->conf.visLayerNames[i]);
     }
     ImTable::end();
+  }
+
+  if (ImGui::CollapsingHeader("Input")) {
+    drawInput();
   }
 
   if (ImGui::CollapsingHeader("ROM Header")) {

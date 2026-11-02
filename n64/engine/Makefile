@@ -19,7 +19,7 @@ src += $(wildcard src/debug/*.cpp) $(wildcard src/debug/overlay/*.cpp)
 src += $(wildcard src/scene/components/*.cpp) $(wildcard src/renderer/*.cpp)
 src += $(wildcard src/renderer/hdr/*.cpp) $(wildcard src/renderer/bigtex/*.cpp)
 src += $(wildcard src/renderer/particles/*.cpp) $(wildcard src/script/*.cpp)
-src += $(wildcard src/libdragon/*.cpp)
+src += $(wildcard src/libdragon/*.cpp) $(wildcard src/input/*.cpp)
 
 # HDR / Bloom ucode
 extraObj = $(BUILD_DIR)/renderer/hdr/rsp_hdr.o

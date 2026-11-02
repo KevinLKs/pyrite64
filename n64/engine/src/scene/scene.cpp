@@ -22,6 +22,7 @@
 #include "lib/matrixManager.h"
 #include "assets/assetManager.h"
 #include "audio/audioManager.h"
+#include "input/input.h"
 #include "../audio/audioManagerPrivate.h"
 #include "../debug/overlay.h"
 #include "debug/debugMenu.h"
@@ -154,6 +155,7 @@ void P64::Scene::update(float deltaTime)
 {
   accumulator_ticks += TICKS_FROM_US((uint32_t)(deltaTime * 1000000.0f));
   joypad_poll();
+  Input::update(deltaTime);
 
   // reset metrics
   ticksActorUpdate = 0;

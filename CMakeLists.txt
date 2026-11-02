@@ -149,6 +149,8 @@ add_executable(pyrite64 src/main.cpp
         src/renderer/texture.cpp
         src/renderer/texture.h
         src/project/project.cpp
+        src/project/inputMap.h
+        src/project/inputMap.cpp
         src/editor/actions.h
         src/editor/actions.cpp
         src/editor/audioPreview.h
@@ -379,10 +381,12 @@ if(PYRITE64_BUILD_TESTS)
         tests/main.cpp
         tests/codeParser.cpp
         tests/layer.cpp
+        tests/inputMap.cpp
+        src/project/inputMap.cpp
         src/utils/codeParser.cpp
         src/utils/logger.cpp
     )
-    target_include_directories(pyrite64_tests PRIVATE src vendored/doctest vendored/glm vendored/SHA256/include)
+    target_include_directories(pyrite64_tests PRIVATE src vendored/doctest vendored/glm vendored/SHA256/include vendored/tiny3d/tools/gltf_importer/src/lib)
     add_test(NAME pyrite64_tests COMMAND pyrite64_tests)
 endif()
 

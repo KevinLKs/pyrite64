@@ -9,6 +9,7 @@
 #include <cstdint>
 
 #include "assetManager.h"
+#include "inputMap.h"
 #include "scene/sceneManager.h"
 
 namespace Project
@@ -70,6 +71,8 @@ namespace Project
 
     std::array<std::string, 8> collLayerNames{};
     std::array<std::string, 8> visLayerNames{};
+
+    InputMap::Conf input{};
 
     std::string serialize() const;
   };

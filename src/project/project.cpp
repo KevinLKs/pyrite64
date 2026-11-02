@@ -151,6 +151,7 @@ std::string Project::ProjectConf::serialize() const {
     .set("visLayer5", visLayerNames[5])
     .set("visLayer6", visLayerNames[6])
     .set("visLayer7", visLayerNames[7])
+    .set("input", InputMap::toJson(input))
     .toString();
 }
 
@@ -166,6 +167,7 @@ void Project::Project::deserialize(const nlohmann::json &doc) {
   conf.sceneIdOnReset = doc.value("sceneIdOnReset", 1);
   conf.sceneIdLastOpened = doc.value("sceneIdLastOpened", 1);
   conf.debugMenu = doc.value("debugMenu", true);
+  conf.input = InputMap::fromJson(doc.value("input", nlohmann::json::object()));
 
   for(int i=0; i<8; ++i) {
     conf.collLayerNames[i] = doc.value("collLayer" + std::to_string(i), "Layer " + std::to_string(i));

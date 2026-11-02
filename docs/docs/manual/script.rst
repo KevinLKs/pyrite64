@@ -12,4 +12,5 @@ Scripting
   script/objScript
   script/nodeGraph
   script/nodeGraphCustom
+  script/input
   script/editorScript
