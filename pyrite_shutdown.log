@@ -1,14 +1,14 @@
-20:45:53.207 close: project teardown start
-20:45:53.207 close: onProjectClosing done
-20:45:53.207 close: undo history cleared
-20:45:53.207 close: ScriptHost stopped (editor scripts)
-20:45:53.213 close: project deleted (asset manager, file watcher)
-20:45:53.213 main loop left
-20:45:53.214 window state saved
-20:45:53.214 editor scene destroyed
-20:45:53.214 update check thread joined
-20:45:53.220 GPU idle
-20:45:53.220 MCP bridge stopped
-20:45:53.222 ImGui shut down
-20:45:53.279 GPU device and window destroyed
-20:45:53.293 SDL_Quit done (clean exit)
+20:52:29.736 close: project teardown start
+20:52:29.737 close: onProjectClosing done
+20:52:29.737 close: undo history cleared
+20:52:29.737 close: ScriptHost stopped (editor scripts)
+20:52:29.742 close: project deleted (asset manager, file watcher)
+20:52:29.742 main loop left
+20:52:29.743 window state saved
+20:52:29.743 editor scene destroyed
+20:52:29.743 update check thread joined
+20:52:29.750 GPU idle
+20:52:29.750 MCP bridge stopped
+20:52:29.752 ImGui shut down
+20:52:29.820 GPU device and window destroyed
+20:52:29.843 SDL_Quit done (clean exit)
