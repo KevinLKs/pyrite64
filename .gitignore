@@ -12,3 +12,5 @@ pyrite64.exe
 *.dll
 preferences.json
 *.AppImage
+# fork: local shutdown trace written by the editor
+pyrite_shutdown.log
