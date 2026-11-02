@@ -170,6 +170,10 @@ namespace Project
       // Import scale of a model. Cheap: reads only the glTF header data, the model is not loaded.
       float getModelScale(uint64_t uuid);
 
+      // Fork: an image's preview texture is decoded and uploaded on first use (editor only),
+      // instead of every PNG at project open. Main thread only.
+      void ensureTexture(AssetManagerEntry &entry);
+
       // Fork: a model's materials for build-time validation (MaterialInstance::validateWithModel)
       // without parsing meshes or animations. Returns the full model if it is already loaded,
       // otherwise the saved conf materials whose names exist in the glTF. Placeholders (dynType)
@@ -214,6 +218,9 @@ namespace Project
         auto &entry = entries[it->second.first][it->second.second];
         if (!entry.loaded && entry.type == FileType::MODEL_3D) {
           ensureLoaded(entry);
+        }
+        if (!entry.loaded && entry.type == FileType::IMAGE) {
+          ensureTexture(entry);
         }
         return &entry;
       }

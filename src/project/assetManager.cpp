@@ -492,7 +492,15 @@ const Project::Assets::Model3D& Project::AssetManager::getModelMaterialsOnly(uin
   return res;
 }
 
+void Project::AssetManager::ensureTexture(AssetManagerEntry &entry)
+{
+  if (entry.loaded || entry.type != FileType::IMAGE)return;
+  if (!ctx.window || !editorMode)return;
+  reloadEntry(entry, entry.path);
+}
+
 void Project::AssetManager::reload() {
+  auto timeScan = std::chrono::steady_clock::now();
   materialOnlyCache.clear();
   for (auto &e : entries)e.clear();
   entriesMap.clear();
@@ -519,12 +527,8 @@ void Project::AssetManager::reload() {
       }
       assetEntry.fileAge = Utils::FS::getFileAge(path);
 
-      // image previews are only needed when there is something to draw them in
-      if (assetEntry.type == FileType::IMAGE) {
-        if (ctx.window && editorMode) {
-          reloadEntry(assetEntry, path.string());
-        }
-      }
+      // Fork: image previews load on first use (ensureTexture), not here.
+      // Opening Poke64 decoded all 2,781 PNGs first (11 s warm, 60 s cold disk cache).
 
       if (assetEntry.type == FileType::PREFAB) {
         reloadEntry(assetEntry, path.string());
@@ -576,6 +580,13 @@ void Project::AssetManager::reload() {
   }
 
   rebuildIndex();
+
+  {
+    size_t count = 0;
+    for (auto &typed : entries)count += typed.size();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - timeScan).count();
+    Utils::Logger::log("[time] asset scan: " + std::to_string(count) + " assets, " + std::to_string(ms) + " ms");
+  }
 
   // Models are not loaded here: getEntryByUUID() loads one on first access, and
   // getModelScale() answers the scale without loading. Opening a project, or starting

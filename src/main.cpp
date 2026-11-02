@@ -150,6 +150,21 @@ void fatal(const char *fmt, ...)
 
 
 // Main code
+// Fork: writes each shutdown step to pyrite_shutdown.log next to the exe, flushed per line,
+// so a hang or crash on close shows the last step reached even though the log window is gone.
+static void shutdownTrace(const char *step)
+{
+  static FILE *traceFile = nullptr;
+  if(!traceFile) {
+    auto tracePath = Utils::Proc::getSelfPath().parent_path() / "pyrite_shutdown.log";
+    traceFile = fopen(tracePath.string().c_str(), "w");
+  }
+  if(traceFile) {
+    fprintf(traceFile, "%s%s\n", Utils::Logger::timestamp().c_str(), step);
+    fflush(traceFile);
+  }
+}
+
 int main(int argc, char** argv)
 {
   Project::Component::init();
@@ -480,11 +495,16 @@ int main(int argc, char** argv)
 
       if(ctx.wantsProjectClose)
       {
+        if(closeRequested)shutdownTrace("close: project teardown start");
         // Remember this project's open windows before tearing it down (covers app exit too).
         if(ctx.editorScene) ctx.editorScene->onProjectClosing();
+        if(closeRequested)shutdownTrace("close: onProjectClosing done");
         Editor::UndoRedo::getHistory().clear();
+        if(closeRequested)shutdownTrace("close: undo history cleared");
         Editor::ScriptHost::stop();
+        if(closeRequested)shutdownTrace("close: ScriptHost stopped (editor scripts)");
         delete ctx.project;
+        if(closeRequested)shutdownTrace("close: project deleted (asset manager, file watcher)");
         ctx.project = nullptr;
         ctx.wantsProjectClose = false;
         if(closeRequested) {
@@ -508,26 +528,35 @@ int main(int argc, char** argv)
     ctx.editorScene.reset();
   }
 
+  shutdownTrace("main loop left");
   editorWindow.saveState();
+  shutdownTrace("window state saved");
 
   // needs to be destroyed before GPU teardown
   ctx.editorScene.reset();
+  shutdownTrace("editor scene destroyed");
 
   updateCheckThread.join();
+  shutdownTrace("update check thread joined");
   SDL_WaitForGPUIdle(ctx.gpu);
+  shutdownTrace("GPU idle");
 
   Editor::McpBridge::stop();
+  shutdownTrace("MCP bridge stopped");
   ImGui_ImplSDL3_Shutdown();
   ImGui_ImplSDLGPU3_Shutdown();
   ImGui::DestroyContext();
+  shutdownTrace("ImGui shut down");
 
   SDL_ReleaseWindowFromGPUDevice(ctx.gpu, ctx.window);
   SDL_DestroyGPUDevice(ctx.gpu);
   SDL_DestroyWindow(ctx.window);
+  shutdownTrace("GPU device and window destroyed");
 #ifdef HAS_SHADER_CROSS
   SDL_ShaderCross_Quit();
 #endif
   SDL_Quit();
+  shutdownTrace("SDL_Quit done (clean exit)");
 
   return 0;
 }

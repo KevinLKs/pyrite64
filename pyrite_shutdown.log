@@ -1,0 +1,14 @@
+20:45:53.207 close: project teardown start
+20:45:53.207 close: onProjectClosing done
+20:45:53.207 close: undo history cleared
+20:45:53.207 close: ScriptHost stopped (editor scripts)
+20:45:53.213 close: project deleted (asset manager, file watcher)
+20:45:53.213 main loop left
+20:45:53.214 window state saved
+20:45:53.214 editor scene destroyed
+20:45:53.214 update check thread joined
+20:45:53.220 GPU idle
+20:45:53.220 MCP bridge stopped
+20:45:53.222 ImGui shut down
+20:45:53.279 GPU device and window destroyed
+20:45:53.293 SDL_Quit done (clean exit)

@@ -614,6 +614,10 @@ void Editor::AssetsBrowser::draw() {
     auto icon = ImTextureRef(nullptr);
     const char* iconTxt = ICON_MDI_FILE_OUTLINE;
     uint64_t scrubUUID = 0;
+    // Fork: textures load when their tile is first on screen, not at project open
+    if (asset.type == FileType::IMAGE && !asset.loaded && ImGui::IsRectVisible({imageSize, imageSize})) {
+      ctx.project->getAssets().ensureTexture(const_cast<std::decay_t<decltype(asset)>&>(asset));
+    }
     if (asset.texture) {
       icon = ImGui::IsRectVisible({imageSize, imageSize})
         ? ImTextureRef(asset.texture->getGPUTex())

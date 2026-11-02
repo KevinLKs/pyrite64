@@ -261,7 +261,10 @@ bool Editor::TextureEditor::drawTexturePicker(const char *label, uint64_t &texUU
               ImGui::GetColorU32(isSel ? ImGuiCol_HeaderActive : ImGuiCol_HeaderHovered), 4.0f);
           }
 
-          // thumbnail, aspect-correct inside the tile
+          // thumbnail, aspect-correct inside the tile (fork: loaded on first display)
+          if(!img->loaded) {
+            assetManager.ensureTexture(const_cast<std::decay_t<decltype(*img)>&>(*img));
+          }
           if(img->texture && img->texture->getWidth() > 0) {
             float w = (float)img->texture->getWidth();
             float h = (float)img->texture->getHeight();
