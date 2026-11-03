@@ -903,7 +903,13 @@ void Editor::Viewport3D::draw()
   bool leftReleased = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
   bool rightClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
 
-  if (!navLocked && !overGizmo && isMouseHover && leftClicked && !isAltDown && !overRotGizmo) {
+  // While flying with right held, left is "move forward", so it must not select
+  if (mouseHeldRight) {
+    selectionPending = false;
+    selectionDragging = false;
+  }
+
+  if (!navLocked && !mouseHeldRight && !overGizmo && isMouseHover && leftClicked && !isAltDown && !overRotGizmo) {
     selectionPending = true;
     selectionDragging = false;
     selectionStart = mousePos;
@@ -1008,6 +1014,8 @@ void Editor::Viewport3D::draw()
       if (ImGui::IsKeyDown(ctx.prefs.keymap.moveRight))moveDir.x = moveSpeed;
       if (ImGui::IsKeyDown(ctx.prefs.keymap.moveDown))moveDir.y = -moveSpeed;
       if (ImGui::IsKeyDown(ctx.prefs.keymap.moveUp))moveDir.y = moveSpeed;
+      // Hold right + left (or left while nav-locked) to fly forward without the keyboard
+      if (mouseHeldLeft && (mouseHeldRight || navLocked))moveDir.z = -moveSpeed;
 
       if(moveDir != glm::vec3{0,0,0}) {
         camera.velocity = camera.rot * moveDir;
@@ -1190,7 +1198,7 @@ void Editor::Viewport3D::draw()
         camera.lookDelta(dragDelta);
         mousePosStart = mousePos = {0,0};
         camera.stopRotateDelta();
-      } else if (isAltDown && mouseHeldLeft) {
+      } else if (isAltDown && mouseHeldLeft && !mouseHeldRight) {
         camera.stopMoveDelta();
         camera.orbitDelta(dragDelta);
       } else if (mouseHeldMiddle) {
